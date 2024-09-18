@@ -1,0 +1,15 @@
+[package]
+name = "static_sqlite"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-rusqlite = { git = "https://github.com/programatik29/tokio-rusqlite.git", rev = "d101d1cb32f462f76b7c639d351e6fcf56528004" }
+static_sqlite_macros = { path = "static_sqlite_macros", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+
