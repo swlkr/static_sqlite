@@ -1,41 +1,53 @@
-pub use ffi::{Sqlite, Value};
+pub use ffi::{blob, integer, null, real, text, Error, Result, Savepoint, Sqlite, Value};
 pub use static_sqlite_macros::sql;
-use std::ffi::NulError;
 extern crate self as static_sqlite;
+
 mod ffi;
 
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("null error: {0}")]
-    Null(#[from] NulError),
-    #[error("sqlite error: {0}")]
-    Sqlite(String),
+pub fn open(path: &str) -> Result<Sqlite> {
+    Sqlite::open(path)
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub fn execute(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<()> {
+    conn.execute(sql, params)
+}
+
+pub fn savepoint<'a>(conn: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
+    conn.savepoint(conn, name)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn migrate(db: &Sqlite) -> Result<()> {
+        let create_migrations =
+            "create table if not exists migrations (version integer primary key)";
+        let create_tests=
+            "create table if not exists tests (id integer primary key, txt text, inte integer, rl real, blb blob, null_text text)";
+
+        let _ = execute(db, &create_migrations, &[])?;
+        let _ = execute(db, &create_tests, &[])?;
+
+        Ok(())
+    }
+
     #[test]
     fn it_works() -> Result<()> {
-        let conn = Sqlite::open(":memory:")?;
+        let db = static_sqlite::open(":memory:")?;
 
-        let sql =
-            "create table tests (id integer primary key, txt text, inte integer, rl real, blb blob)";
-        let _ = conn.execute(sql, &[])?;
-        let sql = "insert into tests (txt, inte, rl, blb) values (?, ?, ?, ?)";
+        let _ = migrate(&db)?;
+
+        let sql = "insert into tests (txt, inte, rl, blb, null_text) values (?, ?, ?, ?, ?)";
         let params = vec![
-            Value::Text("txt".to_string()),
-            Value::Integer(30),
-            Value::Real(50000.50),
-            Value::Blob(vec![0xFF, 0x00, 0xFF, 0x00]),
+            text("txt"),
+            integer(1),
+            real(1.),
+            blob(vec![0xFF, 0x00, 0xFF, 0x00]),
+            null,
         ];
 
-        conn.execute(sql, &params)?;
+        let _ = execute(&db, sql, &params)?;
 
         Ok(())
     }
