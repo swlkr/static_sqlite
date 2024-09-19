@@ -1,5 +1,5 @@
 use std::{
-    ffi::{c_char, c_int, c_void, CStr, CString, NulError},
+    ffi::{c_char, c_int, c_long, c_void, CStr, CString, NulError},
     num::TryFromIntError,
     ops::Deref,
     os::raw::c_double,
@@ -23,7 +23,7 @@ extern "C" {
         len: c_int,
         destructor: *const c_void,
     ) -> c_int;
-    fn sqlite3_bind_int(stmt: *mut c_void, index: c_int, value: c_int) -> c_int;
+    fn sqlite3_bind_int(stmt: *mut c_void, index: c_int, value: c_long) -> c_int;
     fn sqlite3_bind_double(stmt: *mut c_void, index: c_int, value: c_double) -> c_int;
     fn sqlite3_bind_blob(
         stmt: *mut c_void,
@@ -36,6 +36,13 @@ extern "C" {
     fn sqlite3_step(stmt: *mut c_void) -> c_int;
     fn sqlite3_finalize(stmt: *mut c_void) -> c_int;
     fn sqlite3_errmsg(db: *mut c_void) -> *const c_char;
+    fn sqlite3_column_count(stmt: *mut c_void) -> c_int;
+    fn sqlite3_column_type(stmt: *mut c_void, iCol: c_int) -> c_int;
+    fn sqlite3_column_name(stmt: *mut c_void, N: c_int) -> *const c_char;
+    fn sqlite3_column_int64(stmt: *mut c_void, iCol: c_int) -> i64;
+    fn sqlite3_column_double(stmt: *mut c_void, iCol: c_int) -> f64;
+    fn sqlite3_column_text(stmt: *mut c_void, iCol: c_int) -> *const u8;
+    fn sqlite3_column_bytes(stmt: *mut c_void, iCol: c_int) -> c_int;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -74,7 +81,7 @@ impl Sqlite {
         Ok(Sqlite { db })
     }
 
-    pub(crate) fn prepare(&self, sql: &str) -> Result<*mut c_void> {
+    pub(crate) fn prepare(&self, sql: &str, params: &[Value]) -> Result<*mut c_void> {
         let c_sql = CString::new(sql)?;
         let mut stmt: *mut c_void = std::ptr::null_mut();
         unsafe {
@@ -85,6 +92,39 @@ impl Sqlite {
                     .into_owned();
                 return Err(Error::Sqlite(error));
             } else {
+                for (i, param) in params.iter().enumerate() {
+                    match param {
+                        Value::Text(s) => {
+                            let s = s.as_str();
+                            sqlite3_bind_text(
+                                stmt,
+                                (i + 1) as i32,
+                                s.as_ptr() as *const _,
+                                s.len() as c_int,
+                                std::ptr::null(),
+                            );
+                        }
+                        Value::Integer(n) => {
+                            sqlite3_bind_int(stmt, (i + 1) as i32, *n);
+                        }
+                        Value::Real(f) => {
+                            sqlite3_bind_double(stmt, (i + 1) as i32, *f);
+                        }
+                        Value::Blob(b) => {
+                            sqlite3_bind_blob(
+                                stmt,
+                                (i + 1) as i32,
+                                b.as_ptr() as *const _,
+                                b.len() as c_int,
+                                std::ptr::null(),
+                            );
+                        }
+                        Value::Null => {
+                            sqlite3_bind_null(stmt, (i + 1) as i32);
+                        }
+                    }
+                }
+
                 return Ok(stmt);
             }
         }
@@ -92,43 +132,9 @@ impl Sqlite {
 
     pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<()> {
         unsafe {
-            let stmt = self.prepare(sql)?;
+            let stmt = self.prepare(sql, params)?;
 
-            for (i, param) in params.iter().enumerate() {
-                match param {
-                    Value::Text(s) => {
-                        let s = s.as_str();
-                        // let c_str = CString::new(&s)?;
-                        sqlite3_bind_text(
-                            stmt,
-                            (i + 1) as i32,
-                            s.as_ptr() as *const _,
-                            s.len() as c_int,
-                            std::ptr::null(),
-                        );
-                    }
-                    Value::Integer(n) => {
-                        sqlite3_bind_int(stmt, (i + 1) as i32, *n);
-                    }
-                    Value::Real(f) => {
-                        sqlite3_bind_double(stmt, (i + 1) as i32, *f);
-                    }
-                    Value::Blob(b) => {
-                        sqlite3_bind_blob(
-                            stmt,
-                            (i + 1) as i32,
-                            b.as_ptr() as *const _,
-                            b.len() as c_int,
-                            std::ptr::null(),
-                        );
-                    }
-                    Value::Null => {
-                        sqlite3_bind_null(stmt, (i + 1) as i32);
-                    }
-                }
-            }
-
-            if sqlite3_step(stmt) != 101 {
+            while sqlite3_step(stmt) != 101 {
                 let error = CStr::from_ptr(sqlite3_errmsg(self.db))
                     .to_string_lossy()
                     .into_owned();
@@ -139,6 +145,51 @@ impl Sqlite {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
+        unsafe {
+            let stmt = self.prepare(sql, params)?;
+            let mut rows = Vec::new();
+            while sqlite3_step(stmt) == 100 {
+                // SQLITE_ROW
+                let column_count = sqlite3_column_count(stmt);
+                let mut values: Vec<(String, Value)> = vec![];
+
+                for i in 0..column_count {
+                    let name = CStr::from_ptr(sqlite3_column_name(stmt, i))
+                        .to_string_lossy()
+                        .into_owned();
+
+                    let value = match sqlite3_column_type(stmt, i) {
+                        1 => Value::Integer(sqlite3_column_int64(stmt, i)),
+                        2 => Value::Real(sqlite3_column_double(stmt, i)),
+                        3 => {
+                            let text =
+                                CStr::from_ptr(sqlite3_column_text(stmt, i) as *const c_char)
+                                    .to_string_lossy()
+                                    .into_owned();
+                            Value::Text(text)
+                        }
+                        4 => {
+                            let len = sqlite3_column_bytes(stmt, i) as usize;
+                            let ptr = sqlite3_column_text(stmt, i);
+                            let slice = std::slice::from_raw_parts(ptr, len);
+                            Value::Blob(slice.to_vec())
+                        }
+                        _ => Value::Null,
+                    };
+
+                    values.push((name, value));
+                }
+
+                let row = T::from_row(values)?;
+                rows.push(row);
+            }
+            sqlite3_finalize(stmt);
+
+            Ok(rows)
+        }
     }
 
     pub(crate) fn savepoint<'a>(
@@ -167,13 +218,13 @@ pub struct Savepoint<'a> {
 impl<'a> Savepoint<'a> {
     pub(crate) fn new(sqlite: &'a Sqlite, name: &'a str) -> Result<Self> {
         let sql = format!("savepoint {}", name);
-        let _stmt = sqlite.prepare(&sql)?;
+        let _stmt = sqlite.prepare(&sql, &[])?;
         Ok(Self { sqlite, name })
     }
 
     pub(crate) fn release(&self) -> Result<()> {
         let sql = format!("release savepoint {}", self.name);
-        let _stmt = self.prepare(&sql)?;
+        let _stmt = self.prepare(&sql, &[])?;
         Ok(())
     }
 }
@@ -194,7 +245,7 @@ impl<'a> Drop for Savepoint<'a> {
 
 pub enum Value {
     Text(String),
-    Integer(i32),
+    Integer(i64),
     Real(f64),
     Blob(Vec<u8>),
     Null,
@@ -204,7 +255,7 @@ pub fn text(val: impl ToString) -> Value {
     Value::Text(val.to_string())
 }
 
-pub fn integer(val: i32) -> Value {
+pub fn integer(val: i64) -> Value {
     Value::Integer(val)
 }
 
@@ -218,3 +269,96 @@ pub fn blob(val: Vec<u8>) -> Value {
 
 #[allow(non_upper_case_globals)]
 pub const null: Value = Value::Null;
+
+pub trait FromRow: Sized {
+    fn from_row(columns: Vec<(String, Value)>) -> Result<Self>;
+}
+
+impl TryFrom<Value> for String {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Text(s) => Ok(s),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Integer(val) => Ok(val),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+
+impl TryFrom<Value> for f64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Real(val) => Ok(val),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Blob(val) => Ok(val),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+
+impl TryFrom<Value> for Option<String> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Text(s) => Ok(Some(s)),
+            Value::Null => Ok(None),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+impl TryFrom<Value> for Option<i64> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Integer(val) => Ok(Some(val)),
+            Value::Null => Ok(None),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+impl TryFrom<Value> for Option<f64> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Real(val) => Ok(Some(val)),
+            Value::Null => Ok(None),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
+impl TryFrom<Value> for Option<Vec<u8>> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> std::result::Result<Self, Self::Error> {
+        match value {
+            Value::Blob(val) => Ok(Some(val)),
+            Value::Null => Ok(None),
+            _ => Err(Error::Sqlite("column type mismatch".into())),
+        }
+    }
+}
