@@ -43,9 +43,9 @@ mod tests {
                 nullable_blob blob
             )";
 
-        let tx = savepoint(db, "migrate")?;
-        let _ = execute(&tx, &create_migrations, &[])?;
-        let _ = execute(&tx, &create_rows, &[])?;
+        let sp = savepoint(db, "migrate")?;
+        let _ = execute(&sp, create_migrations, &[])?;
+        let _ = execute(&sp, create_rows, &[])?;
 
         Ok(())
     }
