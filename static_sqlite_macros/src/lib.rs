@@ -45,50 +45,21 @@ fn to_output(input: Input) -> Output {
 }
 
 fn to_tokens(output: Output) -> TokenStream {
-    let traits: Vec<TokenStream> = output.stmts.iter().map(trait_tokens).collect();
+    // let traits: Vec<TokenStream> = output.stmts.iter().map(trait_tokens).collect();
     let impls: Vec<TokenStream> = output.stmts.iter().map(impl_tokens).collect();
-    let tokens: Vec<TokenStream> = output.stmts.into_iter().map(stmt_tokens).collect();
+    let tokens: Vec<TokenStream> = output.stmts.into_iter().map(struct_tokens).collect();
 
     quote! {
         #(#tokens)*
-
-        #[derive(Clone)]
-        pub struct Db(tokio_rusqlite::Connection);
-
-        pub async fn db(database_url: impl AsRef<std::path::Path>) -> static_sqlite::Result<Db> {
-            let connection = Connection::open(database_url).await?;
-            connection
-                .call(|conn| {
-                    conn.execute_batch(
-                        "PRAGMA foreign_keys = ON;
-                        PRAGMA journal_mode = WAL;
-                        PRAGMA synchronous = NORMAL;",
-                    )
-                    .map_err(|err| err.into())
-                })
-                .await?;
-
-            Ok(Db(connection))
-        }
-
-        pub trait Queries {
-            #(#traits)*
-        }
-
-        impl Queries for Db {
-            #(#impls)*
-        }
+        #(#impls)*
     }
 }
 
 fn impl_tokens(output: &Stmt) -> TokenStream {
     match output {
         Stmt::ExecuteBatch { ident, sql } => quote! {
-            async fn #ident(&self) -> static_sqlite::Result<()> {
-                self
-                    .0
-                    .call(move |conn| conn.execute_batch(#sql).map_err(|err| err.into()))
-                    .await?;
+            fn #ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
+                db.execute(#sql, &[]);
 
                 Ok(())
             }
@@ -100,17 +71,11 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
             in_cols,
         } => {
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
 
             quote! {
-                async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<usize> {
-                    Ok(self
-                        .0
-                        .call(move |conn| {
-                            let params = tokio_rusqlite::params![#(#param_fields,)*];
-                            conn.execute(#sql, params).map_err(|err| err.into())
-                        })
-                        .await?)
+                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<usize> {
+                    db.execute(#sql, vec![#(#param_fields,)*])
                 }
             }
         }
@@ -120,23 +85,12 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
             in_cols,
         } => {
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
 
             quote! {
-                 async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<i64> {
-                    let result = self.0
-                        .call(move |conn| {
-                            let mut stmt = conn.prepare(#sql)?;
-                            let params = tokio_rusqlite::params![#(#param_fields,)*];
-                            let rows = stmt.query_map(params, |row| row.get(0))?
-                                .collect::<rusqlite::Result<Vec<_>>>();
-
-                            match rows {
-                                Ok(rows) => Ok(rows.last().cloned().expect("count(*) expected")),
-                                Err(err) => Err(err.into()),
-                            }
-                        })
-                        .await?;
+                 fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<i64> {
+                    let rows = db.rows(#sql, vec![#(#param_fields,)*])
+                    let result: i64 = rows.nth(0).expect("count(*) expected").1.try_into()?;
 
                     Ok(result)
                 }
@@ -155,54 +109,37 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
                 Cast::None => struct_ident(&ident),
             };
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
-            let (return_statement, return_type) = match ret {
-                QueryReturn::Row => (
-                    quote! {
-                        match rows {
-                            Ok(rows) => Ok(rows.last().unwrap().clone()),
-                            Err(err) => Err(err.into()),
-                        }
-                    },
-                    quote! { #struct_ident },
-                ),
-                QueryReturn::OptionRow => (
-                    quote! {
-                        match rows {
-                            Ok(rows) => Ok(rows.last().cloned()),
-                            Err(err) => Err(err.into()),
-                        }
-                    },
-                    quote! { Option<#struct_ident> },
-                ),
-                QueryReturn::Rows => (
-                    quote! {
-                        rows.map_err(|err| err.into())
-                    },
-                    quote! { Vec<#struct_ident> },
-                ),
-            };
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
+            // let (return_statement, return_type) = match ret {
+            //     QueryReturn::Row => (
+            //         quote! {
+            //             Ok(rows.last().unwrap().clone())
+            //         },
+            //         quote! { #struct_ident },
+            //     ),
+            //     QueryReturn::OptionRow => (
+            //         quote! {
+            //             Ok(rows.last().cloned())
+            //         },
+            //         quote! { Option<#struct_ident> },
+            //     ),
+            //     QueryReturn::Rows => (
+            //         quote! {
+            //             rows
+            //         },
+            //         quote! { Vec<#struct_ident> },
+            //     ),
+            // };
             quote! {
-                async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<#return_type> {
-                    Ok(self.0
-                        .call(move |conn| {
-                            let mut stmt = conn.prepare(#sql)?;
-                            let params = tokio_rusqlite::params![#(#param_fields,)*];
-                            let rows = stmt
-                                .query_map(params, |row| #struct_ident::new(row))?
-                                .collect::<rusqlite::Result<Vec<#struct_ident>>>();
-                            #return_statement
-                        })
-                        .await?)
+                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<Vec<#struct_ident>> {
+                    db.query(#sql, &vec![#(#param_fields,)*])
                 }
             }
         }
         Stmt::CreateTable { sql, fn_ident, .. } => {
             quote! {
-                async fn #fn_ident(&self) -> static_sqlite::Result<()> {
-                    self.0
-                        .call(move |conn| conn.execute_batch(#sql).map_err(|err| err.into()))
-                        .await?;
+                fn #fn_ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
+                    let _ = db.execute(#sql, &[])?;
 
                     Ok(())
                 }
@@ -211,55 +148,55 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
     }
 }
 
-fn trait_tokens(output: &Stmt) -> TokenStream {
-    match output {
-        Stmt::ExecuteBatch { ident, .. } => quote! {
-            async fn #ident(&self) -> static_sqlite::Result<()>;
-        },
-        Stmt::Execute { ident, in_cols, .. } => {
-            let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
+// fn trait_tokens(output: &Stmt) -> TokenStream {
+//     match output {
+//         Stmt::ExecuteBatch { ident, .. } => quote! {
+//             async fn #ident(&self) -> static_sqlite::Result<()>;
+//         },
+//         Stmt::Execute { ident, in_cols, .. } => {
+//             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
 
-            quote! {
-                async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<usize>;
-            }
-        }
-        Stmt::AggQuery { ident, in_cols, .. } => {
-            let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            quote! {
-                async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<i64>;
-            }
-        }
-        Stmt::Query {
-            cast,
-            ident,
-            in_cols,
-            ret,
-            ..
-        } => {
-            let struct_ident = match &cast {
-                Cast::T(ident) | Cast::Vec(ident) => ident.clone(),
-                Cast::None => struct_ident(&ident),
-            };
-            let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let return_type = match ret {
-                QueryReturn::Row => quote! { #struct_ident },
-                QueryReturn::OptionRow => quote! { Option<#struct_ident> },
-                QueryReturn::Rows => quote! { Vec<#struct_ident> },
-            };
+//             quote! {
+//                 async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<usize>;
+//             }
+//         }
+//         Stmt::AggQuery { ident, in_cols, .. } => {
+//             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
+//             quote! {
+//                 async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<i64>;
+//             }
+//         }
+//         Stmt::Query {
+//             cast,
+//             ident,
+//             in_cols,
+//             ret,
+//             ..
+//         } => {
+//             let struct_ident = match &cast {
+//                 Cast::T(ident) | Cast::Vec(ident) => ident.clone(),
+//                 Cast::None => struct_ident(&ident),
+//             };
+//             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
+//             let return_type = match ret {
+//                 QueryReturn::Row => quote! { #struct_ident },
+//                 QueryReturn::OptionRow => quote! { Option<#struct_ident> },
+//                 QueryReturn::Rows => quote! { Vec<#struct_ident> },
+//             };
 
-            quote! {
-                async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<#return_type>;
-            }
-        }
-        Stmt::CreateTable { fn_ident, .. } => {
-            quote! {
-                async fn #fn_ident(&self) -> static_sqlite::Result<()>;
-            }
-        }
-    }
-}
+//             quote! {
+//                 async fn #ident(&self, #(#fn_args,)*) -> static_sqlite::Result<#return_type>;
+//             }
+//         }
+//         Stmt::CreateTable { fn_ident, .. } => {
+//             quote! {
+//                 async fn #fn_ident(&self) -> static_sqlite::Result<()>;
+//             }
+//         }
+//     }
+// }
 
-fn stmt_tokens(output: Stmt) -> TokenStream {
+fn struct_tokens(output: Stmt) -> TokenStream {
     match output {
         Stmt::ExecuteBatch { .. } | Stmt::Execute { .. } | Stmt::AggQuery { .. } => quote! {},
         Stmt::Query {
@@ -282,27 +219,36 @@ fn stmt_tokens(output: Stmt) -> TokenStream {
             let name_struct_self_fields: Vec<TokenStream> =
                 in_cols.iter().map(name_struct_self_tokens).collect();
             let struct_fields: Vec<TokenStream> = out_cols.iter().map(column_tokens).collect();
-            let instance_fields: Vec<TokenStream> = out_cols.iter().map(row_tokens).collect();
+            let match_fields: Vec<TokenStream> = out_cols.iter().map(match_tokens).collect();
 
             let struct_tokens = match &cast {
                 Cast::None => quote! {
-                    #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
-                    #[serde(crate = "crate::serde")]
+                    #[derive(Default, Debug, Clone, PartialEq)]
                     pub struct #struct_ident {
                         #(#struct_fields,)*
                     }
 
                     impl #struct_ident {
-                        pub fn new(row: &tokio_rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-                            Ok(Self { #(#instance_fields,)* ..Default::default() })
-                        }
-
                         pub fn names() -> #name_struct_ident {
                             #name_struct_ident { #(#name_struct_self_fields,)* }
                         }
                     }
 
                     pub struct #name_struct_ident { #(#name_struct_fields,)* }
+
+                    impl static_sqlite::FromRow for #struct_ident {
+                        fn from_row(columns: Vec<(String, static_sqlite::Value)>) -> static_sqlite::Result<Self> {
+                            let mut row = #struct_ident::default();
+                            for (column, value) in columns {
+                                match column.as_str() {
+                                    #(#match_fields,)*
+                                    _ => {}
+                                }
+                            }
+
+                            Ok(row)
+                        }
+                    }
                 },
                 Cast::T(_) | Cast::Vec(_) => quote! {},
             };
@@ -322,7 +268,8 @@ fn stmt_tokens(output: Stmt) -> TokenStream {
                 Cast::None => struct_ident(&fn_ident),
             };
             let struct_fields: Vec<TokenStream> = cols.iter().map(column_tokens).collect();
-            let instance_fields: Vec<TokenStream> = cols.iter().map(row_tokens).collect();
+            // let instance_fields: Vec<TokenStream> = cols.iter().map(row_tokens).collect();
+            let match_fields: Vec<TokenStream> = cols.iter().map(match_tokens).collect();
             let name_struct_ident = Ident::new(
                 &format!("{}Names", &struct_ident.to_string()),
                 Span::call_site(),
@@ -333,24 +280,32 @@ fn stmt_tokens(output: Stmt) -> TokenStream {
                 cols.iter().map(name_struct_self_tokens).collect();
 
             let tokens = quote! {
-                #[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
-                #[serde(crate = "crate::serde")]
+                #[derive(Default, Debug, Clone, PartialEq)]
                 pub struct #struct_ident {
                     #(#struct_fields,)*
                 }
 
                 impl #struct_ident {
-                    pub fn new(row: &tokio_rusqlite::Row<'_>) -> rusqlite::Result<Self> {
-                        let mut output = Self::default();
-                        Ok(Self { #(#instance_fields,)* ..Default::default() })
-                    }
-
                     pub fn names() -> #name_struct_ident {
                         #name_struct_ident { #(#name_struct_self_fields,)* }
                     }
                 }
 
                 pub struct #name_struct_ident { #(#name_struct_fields,)* }
+
+                impl static_sqlite::FromRow for #struct_ident {
+                    fn from_row(columns: Vec<(String, static_sqlite::Value)>) -> static_sqlite::Result<Self> {
+                        let mut row = #struct_ident::default();
+                        for (column, value) in columns {
+                            match column.as_str() {
+                                #(#match_fields,)*
+                                _ => {}
+                            }
+                        }
+
+                        Ok(row)
+                    }
+                }
             };
 
             tokens
@@ -1180,11 +1135,23 @@ fn param_tokens(column: &Column) -> TokenStream {
     quote!(#name)
 }
 
+fn param_tokens2(column: &Column) -> TokenStream {
+    let name = syn::Ident::new(&column.name, proc_macro2::Span::call_site());
+    quote!(#name.into())
+}
+
 fn row_tokens(column: &Column) -> TokenStream {
     let lit_str = &column.name;
     let ident = syn::Ident::new(&lit_str, proc_macro2::Span::call_site());
 
     quote!(#ident: row.get(#lit_str)?)
+}
+
+fn match_tokens(column: &Column) -> TokenStream {
+    let lit_str = &column.name;
+    let ident = syn::Ident::new(&lit_str, proc_macro2::Span::call_site());
+
+    quote!(#lit_str => row.#ident = value.try_into()?)
 }
 
 fn fn_tokens(column: &Column) -> TokenStream {

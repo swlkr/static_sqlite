@@ -43,6 +43,7 @@ extern "C" {
     fn sqlite3_column_double(stmt: *mut c_void, iCol: c_int) -> f64;
     fn sqlite3_column_text(stmt: *mut c_void, iCol: c_int) -> *const u8;
     fn sqlite3_column_bytes(stmt: *mut c_void, iCol: c_int) -> c_int;
+    fn sqlite3_changes(db: *mut c_void) -> c_int;
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -130,7 +131,7 @@ impl Sqlite {
         }
     }
 
-    pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<()> {
+    pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<i32> {
         unsafe {
             let stmt = self.prepare(sql, params)?;
 
@@ -142,9 +143,10 @@ impl Sqlite {
             }
 
             sqlite3_finalize(stmt);
-        }
 
-        Ok(())
+            let changes = sqlite3_changes(self.db);
+            Ok(changes)
+        }
     }
 
     pub(crate) fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
@@ -185,6 +187,49 @@ impl Sqlite {
 
                 let row = T::from_row(values)?;
                 rows.push(row);
+            }
+            sqlite3_finalize(stmt);
+
+            Ok(rows)
+        }
+    }
+
+    pub(crate) fn rows(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<(String, Value)>>> {
+        unsafe {
+            let stmt = self.prepare(sql, params)?;
+            let mut rows = Vec::new();
+            while sqlite3_step(stmt) == 100 {
+                let column_count = sqlite3_column_count(stmt);
+                let mut values: Vec<(String, Value)> = vec![];
+
+                for i in 0..column_count {
+                    let name = CStr::from_ptr(sqlite3_column_name(stmt, i))
+                        .to_string_lossy()
+                        .into_owned();
+
+                    let value = match sqlite3_column_type(stmt, i) {
+                        1 => Value::Integer(sqlite3_column_int64(stmt, i)),
+                        2 => Value::Real(sqlite3_column_double(stmt, i)),
+                        3 => {
+                            let text =
+                                CStr::from_ptr(sqlite3_column_text(stmt, i) as *const c_char)
+                                    .to_string_lossy()
+                                    .into_owned();
+                            Value::Text(text)
+                        }
+                        4 => {
+                            let len = sqlite3_column_bytes(stmt, i) as usize;
+                            let ptr = sqlite3_column_text(stmt, i);
+                            let slice = std::slice::from_raw_parts(ptr, len);
+                            Value::Blob(slice.to_vec())
+                        }
+                        _ => Value::Null,
+                    };
+
+                    values.push((name, value));
+                }
+
+                rows.push(values);
             }
             sqlite3_finalize(stmt);
 
@@ -250,25 +295,6 @@ pub enum Value {
     Blob(Vec<u8>),
     Null,
 }
-
-pub fn text(val: impl ToString) -> Value {
-    Value::Text(val.to_string())
-}
-
-pub fn integer(val: i64) -> Value {
-    Value::Integer(val)
-}
-
-pub fn real(val: f64) -> Value {
-    Value::Real(val)
-}
-
-pub fn blob(val: Vec<u8>) -> Value {
-    Value::Blob(val)
-}
-
-#[allow(non_upper_case_globals)]
-pub const null: Value = Value::Null;
 
 pub trait FromRow: Sized {
     fn from_row(columns: Vec<(String, Value)>) -> Result<Self>;
@@ -360,5 +386,85 @@ impl TryFrom<Value> for Option<Vec<u8>> {
             Value::Null => Ok(None),
             _ => Err(Error::Sqlite("column type mismatch".into())),
         }
+    }
+}
+
+impl From<&str> for Value {
+    fn from(value: &str) -> Self {
+        Value::Text(value.into())
+    }
+}
+
+impl From<String> for Value {
+    fn from(value: String) -> Self {
+        Value::Text(value)
+    }
+}
+
+impl From<Option<&str>> for Value {
+    fn from(value: Option<&str>) -> Self {
+        match value {
+            Some(val) => Value::Text(val.into()),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Option<String>> for Value {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(val) => Value::Text(val),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Option<i64>> for Value {
+    fn from(value: Option<i64>) -> Self {
+        match value {
+            Some(val) => Value::Integer(val),
+            None => Value::Null,
+        }
+    }
+}
+impl From<i64> for Value {
+    fn from(value: i64) -> Self {
+        Value::Integer(value)
+    }
+}
+
+impl From<Option<f64>> for Value {
+    fn from(value: Option<f64>) -> Self {
+        match value {
+            Some(val) => Value::Real(val),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<f64> for Value {
+    fn from(value: f64) -> Self {
+        Value::Real(value)
+    }
+}
+
+impl From<Option<Vec<u8>>> for Value {
+    fn from(value: Option<Vec<u8>>) -> Self {
+        match value {
+            Some(val) => Value::Blob(val),
+            None => Value::Null,
+        }
+    }
+}
+
+impl From<Vec<u8>> for Value {
+    fn from(value: Vec<u8>) -> Self {
+        Value::Blob(value)
+    }
+}
+
+impl From<()> for Value {
+    fn from(_value: ()) -> Self {
+        Value::Null
     }
 }

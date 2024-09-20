@@ -1,4 +1,4 @@
-pub use ffi::{blob, integer, null, real, text, Error, FromRow, Result, Savepoint, Sqlite, Value};
+pub use ffi::{Error, FromRow, Result, Savepoint, Sqlite, Value};
 pub use static_sqlite_macros::sql;
 extern crate self as static_sqlite;
 
@@ -8,12 +8,16 @@ pub fn open(path: &str) -> Result<Sqlite> {
     Sqlite::open(path)
 }
 
-pub fn execute(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<()> {
+pub fn execute(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<i32> {
     conn.execute(sql, params)
 }
 
 pub fn query<T: FromRow>(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<Vec<T>> {
     conn.query(sql, params)
+}
+
+pub fn rows(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<Vec<Vec<(String, Value)>>> {
+    conn.rows(sql, params)
 }
 
 pub fn savepoint<'a>(conn: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
@@ -24,9 +28,27 @@ pub fn savepoint<'a>(conn: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
 mod tests {
     use super::*;
 
-    fn migrate(db: &Sqlite) -> Result<()> {
-        let create_migrations = "create table migrations (version integer primary key)";
-        let create_rows = "
+    sql! {
+        let create_migrations = r#"
+            create table if not exists migrations (version integer primary key)
+        "# as Migration;
+
+        let migrations = r#"
+            select version
+            from migrations
+            order by version desc
+            limit 1
+        "# as Vec<Migration>;
+
+        let update_migration = r#"
+            insert into migrations (version)
+            values (?)
+            on conflict (version)
+            do update set version = excluded.version + 1
+            returning *
+        "# as Migration;
+
+        let create_rows = r#"
             create table rows (
                 id integer primary key,
                 not_null_text text not null,
@@ -41,22 +63,10 @@ mod tests {
                 nullable_integer integer,
                 nullable_real real,
                 nullable_blob blob
-            )";
+            )
+        "# as Row;
 
-        let sp = savepoint(db, "migrate")?;
-        let _ = execute(&sp, create_migrations, &[])?;
-        let _ = execute(&sp, create_rows, &[])?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn it_works() -> Result<()> {
-        let db = static_sqlite::open(":memory:")?;
-
-        let _ = migrate(&db)?;
-
-        let sql = "
+        let insert_row = r#"
             insert into rows (
                 not_null_text,
                 not_null_integer,
@@ -76,72 +86,58 @@ mod tests {
                 ?, ?, ?, ?,
                 ?, ?, ?, ?
             )
-            returning *";
-        let params = vec![
-            text("not_null_text"),
-            integer(1),
-            real(1.),
-            blob(vec![0xFF, 0x00, 0xFF, 0x00]),
-            null,
-            null,
-            null,
-            null,
-            text("nullable_text"),
-            integer(2),
-            real(2.),
-            blob(vec![0x00, 0xFF, 0x00, 0xFF]),
-        ];
+            returning *
+        "# as Vec<Row>;
+    }
 
-        #[derive(PartialEq, Debug, Default)]
-        struct Row {
-            not_null_text: String,
-            not_null_integer: i64,
-            not_null_real: f64,
-            not_null_blob: Vec<u8>,
-            null_text: Option<String>,
-            null_integer: Option<i64>,
-            null_real: Option<f64>,
-            null_blob: Option<Vec<u8>>,
-            nullable_text: Option<String>,
-            nullable_integer: Option<i64>,
-            nullable_real: Option<f64>,
-            nullable_blob: Option<Vec<u8>>,
-        }
-
-        impl FromRow for Row {
-            fn from_row(columns: Vec<(String, Value)>) -> Result<Self> {
-                let mut row = Row::default();
-                for (column, value) in columns {
-                    match column.as_str() {
-                        "not_null_text" => row.not_null_text = value.try_into()?,
-                        "not_null_integer" => row.not_null_integer = value.try_into()?,
-                        "not_null_real" => row.not_null_real = value.try_into()?,
-                        "not_null_blob" => row.not_null_blob = value.try_into()?,
-                        "null_text" => row.null_text = value.try_into()?,
-                        "null_integer" => row.null_integer = value.try_into()?,
-                        "null_real" => row.null_real = value.try_into()?,
-                        "null_blob" => row.null_blob = value.try_into()?,
-                        "nullable_text" => row.nullable_text = value.try_into()?,
-                        "nullable_integer" => row.nullable_integer = value.try_into()?,
-                        "nullable_real" => row.nullable_real = value.try_into()?,
-                        "nullable_blob" => row.nullable_blob = value.try_into()?,
-                        _ => {}
-                    }
-                }
-
-                Ok(row)
+    fn migrate(db: &Sqlite) -> Result<()> {
+        let sp = savepoint(db, "migrate")?;
+        let _ = create_migrations(&sp)?;
+        let version = match migrations(&sp)?.first() {
+            Some(Migration { version }) => *version,
+            None => 0,
+        };
+        match version {
+            0 => {
+                let _ = create_rows(&sp)?;
             }
+            _ => {}
         }
+        let _ = update_migration(&sp, version + 1)?;
 
-        let tests: Vec<Row> = query(&db, sql, &params)?;
+        Ok(())
+    }
+
+    #[test]
+    fn it_works() -> Result<()> {
+        let db = static_sqlite::open(":memory:")?;
+
+        let _ = migrate(&db)?;
+
+        let rows: Vec<Row> = insert_row(
+            &db,
+            "not_null_text".into(),
+            1,
+            1.0,
+            vec![0xBE, 0xEF],
+            None,
+            None,
+            None,
+            None,
+            Some("nullable_text".into()),
+            Some(2),
+            Some(2.0),
+            Some(vec![0xFE, 0xED]),
+        )?;
 
         assert_eq!(
-            tests.into_iter().nth(0).unwrap(),
+            rows.into_iter().nth(0).unwrap(),
             Row {
+                id: 1,
                 not_null_text: "not_null_text".into(),
                 not_null_integer: 1,
                 not_null_real: 1.,
-                not_null_blob: vec![0xFF, 0x00, 0xFF, 0x00],
+                not_null_blob: vec![0xBE, 0xEF],
                 null_text: None,
                 null_integer: None,
                 null_real: None,
@@ -149,7 +145,7 @@ mod tests {
                 nullable_text: Some("nullable_text".into()),
                 nullable_integer: Some(2),
                 nullable_real: Some(2.),
-                nullable_blob: Some(vec![0x00, 0xFF, 0x00, 0xFF])
+                nullable_blob: Some(vec![0xFE, 0xED]),
             }
         );
 
