@@ -38,7 +38,7 @@ mod tests {
             from migrations
             order by version desc
             limit 1
-        "# as Vec<Migration>;
+        "#;
 
         let update_migration = r#"
             insert into migrations (version)
@@ -46,7 +46,7 @@ mod tests {
             on conflict (version)
             do update set version = excluded.version + 1
             returning *
-        "# as Migration;
+        "#;
 
         let create_rows = r#"
             create table rows (
@@ -87,7 +87,7 @@ mod tests {
                 ?, ?, ?, ?
             )
             returning *
-        "# as Vec<Row>;
+        "#;
     }
 
     fn migrate(db: &Sqlite) -> Result<()> {

@@ -45,8 +45,30 @@ fn to_output(input: Input) -> Output {
 }
 
 fn to_tokens(output: Output) -> TokenStream {
-    // let traits: Vec<TokenStream> = output.stmts.iter().map(trait_tokens).collect();
-    let impls: Vec<TokenStream> = output.stmts.iter().map(impl_tokens).collect();
+    let create_tables: Vec<CreateTable> = output
+        .stmts
+        .iter()
+        .filter_map(|st| match st {
+            Stmt::CreateTable {
+                table_name, cast, ..
+            } => {
+                let ident = match cast {
+                    Cast::T(ident) => ident.clone(),
+                    Cast::Vec(_) | Cast::None => panic!("Create table must be given a struct name"),
+                };
+                Some(CreateTable {
+                    table_name: table_name.clone(),
+                    ident,
+                })
+            }
+            _ => None,
+        })
+        .collect();
+    let impls: Vec<TokenStream> = output
+        .stmts
+        .iter()
+        .map(|stmts| impl_tokens(&create_tables, stmts))
+        .collect();
     let tokens: Vec<TokenStream> = output.stmts.into_iter().map(struct_tokens).collect();
 
     quote! {
@@ -55,7 +77,7 @@ fn to_tokens(output: Output) -> TokenStream {
     }
 }
 
-fn impl_tokens(output: &Stmt) -> TokenStream {
+fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
     match output {
         Stmt::ExecuteBatch { ident, sql } => quote! {
             fn #ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
@@ -71,7 +93,7 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
             in_cols,
         } => {
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
 
             quote! {
                 fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<usize> {
@@ -85,7 +107,7 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
             in_cols,
         } => {
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
 
             quote! {
                  fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<i64> {
@@ -97,19 +119,28 @@ fn impl_tokens(output: &Stmt) -> TokenStream {
             }
         }
         Stmt::Query {
-            cast,
             ident,
             sql,
             in_cols,
-            ret,
+            from,
             ..
         } => {
-            let struct_ident = match &cast {
-                Cast::T(ident) | Cast::Vec(ident) => ident.clone(),
-                Cast::None => struct_ident(&ident),
+            // let struct_ident = match &cast {
+            //     Cast::T(ident) | Cast::Vec(ident) => ident.clone(),
+            //     Cast::None => struct_ident(&ident),
+            // };
+            let struct_ident = match from {
+                FromClause::Table(string) => {
+                    if let Some(ct) = create_tables.iter().find(|ct| &ct.table_name == string) {
+                        ct.ident.clone()
+                    } else {
+                        panic!("this table doesn't exist");
+                    }
+                }
+                FromClause::Join(_) | FromClause::None => struct_ident(&ident),
             };
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
-            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens2).collect();
+            let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
             // let (return_statement, return_type) = match ret {
             //     QueryReturn::Row => (
             //         quote! {
@@ -398,6 +429,7 @@ fn create_table_stmt(
         .collect::<Vec<_>>();
 
     Some(Stmt::CreateTable {
+        table_name,
         sql,
         fn_ident,
         cast,
@@ -460,6 +492,7 @@ fn query_stmt(
                 panic!("{}: table name does not exist {}", ident, table);
             }
         });
+    let from: FromClause = from.into();
     let in_cols = match selection {
         Some(expr) => columns_from_expr(&db_cols, expr, None),
         None => vec![],
@@ -499,6 +532,7 @@ fn query_stmt(
         sql,
         in_cols,
         out_cols,
+        from,
         ret,
         cast,
     })
@@ -510,7 +544,7 @@ fn update_stmt(
     sql: String,
     table: &TableWithJoins,
     assignments: &[Assignment],
-    _from: &Option<TableWithJoins>,
+    from: &Option<TableWithJoins>,
     selection: &Option<sqlparser::ast::Expr>,
     returning: &Option<Vec<SelectItem>>,
     cast: Cast,
@@ -546,6 +580,10 @@ fn update_stmt(
         Some(expr) => columns_from_expr(&table_columns, expr, None),
         None => vec![],
     });
+    let from: FromClause = match from {
+        Some(fr) => fr.into(),
+        None => FromClause::None,
+    };
 
     match returning {
         Some(_) => {
@@ -565,6 +603,7 @@ fn update_stmt(
                 sql,
                 in_cols,
                 out_cols,
+                from,
                 ret: QueryReturn::Row,
                 cast,
             })
@@ -750,6 +789,7 @@ fn insert_stmt(
                 Some(_) | None => QueryReturn::Row,
             };
 
+            let from = FromClause::Table(table_name);
             Some(Stmt::Query {
                 ident,
                 sql,
@@ -757,6 +797,7 @@ fn insert_stmt(
                 out_cols,
                 ret,
                 cast,
+                from,
             })
         }
         None => Some(Stmt::Execute {
@@ -818,6 +859,7 @@ fn delete_stmt(
                 }
                 Cast::None => {}
             }
+            let from: FromClause = from.into();
             Some(Stmt::Query {
                 ident,
                 sql,
@@ -825,6 +867,7 @@ fn delete_stmt(
                 out_cols,
                 ret: QueryReturn::OptionRow,
                 cast,
+                from,
             })
         }
         _ => Some(Stmt::Execute {
@@ -900,7 +943,7 @@ fn columns_from_select_item(
             .collect::<HashSet<_>>(),
         sqlparser::ast::SelectItem::Wildcard(_) => match cast {
             Cast::T(_) | Cast::Vec(_) => table_columns.clone(),
-            Cast::None => todo!("unqualified * not supported yet"),
+            Cast::None => table_columns.clone(),
         },
     }
 }
@@ -1132,19 +1175,7 @@ fn name_struct_self_tokens(column: &Column) -> TokenStream {
 
 fn param_tokens(column: &Column) -> TokenStream {
     let name = syn::Ident::new(&column.name, proc_macro2::Span::call_site());
-    quote!(#name)
-}
-
-fn param_tokens2(column: &Column) -> TokenStream {
-    let name = syn::Ident::new(&column.name, proc_macro2::Span::call_site());
     quote!(#name.into())
-}
-
-fn row_tokens(column: &Column) -> TokenStream {
-    let lit_str = &column.name;
-    let ident = syn::Ident::new(&lit_str, proc_macro2::Span::call_site());
-
-    quote!(#ident: row.get(#lit_str)?)
 }
 
 fn match_tokens(column: &Column) -> TokenStream {
@@ -1217,14 +1248,45 @@ enum Stmt {
         sql: String,
         in_cols: Vec<Column>,
         out_cols: Vec<Column>,
+        from: FromClause,
         ret: QueryReturn,
     },
     CreateTable {
+        table_name: String,
         sql: String,
         fn_ident: Ident,
         cast: Cast,
         cols: Vec<Column>,
     },
+}
+
+#[derive(Debug)]
+enum FromClause {
+    Table(String),
+    #[allow(unused)]
+    Join(Vec<String>),
+    None,
+}
+
+impl From<&Vec<TableWithJoins>> for FromClause {
+    fn from(value: &Vec<TableWithJoins>) -> Self {
+        if value.len() == 1 {
+            let twj = value.iter().nth(0).unwrap();
+            Self::from(twj)
+        } else {
+            FromClause::Join(value.iter().flat_map(|twj| table_names(twj)).collect())
+        }
+    }
+}
+
+impl From<&TableWithJoins> for FromClause {
+    fn from(value: &TableWithJoins) -> Self {
+        let name = match &value.relation {
+            TableFactor::Table { name, .. } => name.to_string(),
+            _ => todo!("still working on more complex select queries"),
+        };
+        FromClause::Table(name)
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -1318,4 +1380,9 @@ fn sql_expr(stmt: syn::Stmt) -> SqlExpr {
         syn::Stmt::Expr(_, _) => todo!(),
         syn::Stmt::Macro(_) => todo!(),
     }
+}
+
+struct CreateTable {
+    table_name: String,
+    ident: Ident,
 }
