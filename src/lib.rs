@@ -29,25 +29,6 @@ mod tests {
     use super::*;
 
     sql! {
-        let create_migrations = r#"
-            create table if not exists migrations (version integer primary key)
-        "# as Migration;
-
-        let latest_migration = r#"
-            select version
-            from migrations
-            order by version desc
-            limit 1
-        "#;
-
-        let update_migration = r#"
-            insert into migrations (version)
-            values (?)
-            on conflict (version)
-            do update set version = excluded.version + 1
-            returning *
-        "#;
-
         let create_rows = r#"
             create table rows (
                 id integer primary key,
@@ -90,17 +71,33 @@ mod tests {
         "#;
     }
 
+    fn user_version(db: &Sqlite) -> Result<i64> {
+        let rws = rows(&db, "PRAGMA user_version", &[])?;
+        match rws.into_iter().nth(0) {
+            Some(cols) => match cols.into_iter().nth(0) {
+                Some(pair) => pair.1.try_into(),
+                None => Ok(0),
+            },
+            None => Ok(0),
+        }
+    }
+
+    fn set_user_version(db: &Sqlite, version: i64) -> Result<()> {
+        let _ = execute(&db, &format!("PRAGMA user_version = {version}"), &[])?;
+        Ok(())
+    }
+
     fn migrate(db: &Sqlite) -> Result<()> {
         let sp = savepoint(db, "migrate")?;
-        let _ = create_migrations(&sp)?;
-        let version = latest_migration(&sp)?.unwrap_or_default().version;
+        let version = user_version(&sp)?;
         match version {
             0 => {
-                let _ = create_rows(&sp)?;
+                create_rows(&sp)?;
             }
             _ => {}
         }
-        let _ = update_migration(&sp, version + 1)?;
+
+        set_user_version(&sp, 1)?;
 
         Ok(())
     }
