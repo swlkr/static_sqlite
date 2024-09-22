@@ -105,9 +105,17 @@ mod tests {
         Ok(())
     }
 
+    fn db(path: &str) -> Result<Sqlite> {
+        let db = static_sqlite::open(path)?;
+        let _ = execute(&db, "PRAGMA journal_mode = wal;", &[])?;
+        let _ = execute(&db, "PRAGMA synchronous = normal;", &[])?;
+        let _ = execute(&db, "PRAGMA foreign_keys = on;", &[])?;
+        Ok(db)
+    }
+
     #[test]
     fn it_works() -> Result<()> {
-        let db = static_sqlite::open(":memory:")?;
+        let db = db(":memory:")?;
 
         let _ = migrate(&db)?;
 

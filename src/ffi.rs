@@ -46,6 +46,9 @@ extern "C" {
     fn sqlite3_changes(db: *mut c_void) -> c_int;
 }
 
+const SQLITE_ROW: i32 = 100;
+const SQLITE_DONE: i32 = 101;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("io error: {0}")]
@@ -135,11 +138,19 @@ impl Sqlite {
         unsafe {
             let stmt = self.prepare(sql, params)?;
 
-            while sqlite3_step(stmt) != 101 {
-                let error = CStr::from_ptr(sqlite3_errmsg(self.db))
-                    .to_string_lossy()
-                    .into_owned();
-                return Err(Error::Sqlite(error));
+            loop {
+                let code = sqlite3_step(stmt);
+                match code {
+                    SQLITE_ROW | SQLITE_DONE => {
+                        break;
+                    }
+                    _ => {
+                        let error = CStr::from_ptr(sqlite3_errmsg(self.db))
+                            .to_string_lossy()
+                            .into_owned();
+                        return Err(Error::Sqlite(error));
+                    }
+                }
             }
 
             sqlite3_finalize(stmt);
@@ -153,8 +164,7 @@ impl Sqlite {
         unsafe {
             let stmt = self.prepare(sql, params)?;
             let mut rows = Vec::new();
-            while sqlite3_step(stmt) == 100 {
-                // SQLITE_ROW
+            while sqlite3_step(stmt) == SQLITE_ROW {
                 let column_count = sqlite3_column_count(stmt);
                 let mut values: Vec<(String, Value)> = vec![];
 
@@ -198,7 +208,7 @@ impl Sqlite {
         unsafe {
             let stmt = self.prepare(sql, params)?;
             let mut rows = Vec::new();
-            while sqlite3_step(stmt) == 100 {
+            while sqlite3_step(stmt) == SQLITE_ROW {
                 let column_count = sqlite3_column_count(stmt);
                 let mut values: Vec<(String, Value)> = vec![];
 
