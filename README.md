@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let migrations = &[create_users];
     migrate(&db, migrations);
 
-    let user = insert_user(&db, "swlkr".into())?;
+    let user = insert_user(&db, "swlkr")?;
 
     assert_eq!(User { id: 1, name: "swlkr".into() }, user)
 }
