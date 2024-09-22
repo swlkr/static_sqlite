@@ -24,14 +24,51 @@ pub fn savepoint<'a>(conn: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
     conn.savepoint(conn, name)
 }
 
+fn user_version(db: &Sqlite) -> Result<i64> {
+    let rws = rows(&db, "PRAGMA user_version", &[])?;
+    match rws.into_iter().nth(0) {
+        Some(cols) => match cols.into_iter().nth(0) {
+            Some(pair) => pair.1.try_into(),
+            None => Ok(0),
+        },
+        None => Ok(0),
+    }
+}
+
+fn set_user_version(db: &Sqlite, version: usize) -> Result<()> {
+    let _ = execute(&db, &format!("PRAGMA user_version = {version}"), &[])?;
+    Ok(())
+}
+
+pub fn migrate<F>(db: &Sqlite, migrations: &[F]) -> Result<()>
+where
+    F: Fn(&Sqlite) -> Result<()>,
+{
+    let sp = savepoint(db, "migrate")?;
+    let version = user_version(&sp)?;
+    let pending_migrations = &migrations[(version as usize)..];
+    for migration in pending_migrations {
+        migration(&sp)?;
+    }
+    set_user_version(&sp, migrations.len())?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{execute, migrate, sql, Result, Sqlite};
 
     sql! {
+        let create_users = r#"
+            create table users (
+                id integer not null primary key,
+                email text not null unique
+            )
+        "# as User;
+
         let create_rows = r#"
             create table rows (
-                id integer primary key,
                 not_null_text text not null,
                 not_null_integer integer not null,
                 not_null_real real not null,
@@ -71,42 +108,15 @@ mod tests {
         "#;
     }
 
-    fn user_version(db: &Sqlite) -> Result<i64> {
-        let rws = rows(&db, "PRAGMA user_version", &[])?;
-        match rws.into_iter().nth(0) {
-            Some(cols) => match cols.into_iter().nth(0) {
-                Some(pair) => pair.1.try_into(),
-                None => Ok(0),
-            },
-            None => Ok(0),
-        }
-    }
-
-    fn set_user_version(db: &Sqlite, version: i64) -> Result<()> {
-        let _ = execute(&db, &format!("PRAGMA user_version = {version}"), &[])?;
-        Ok(())
-    }
-
-    fn migrate(db: &Sqlite) -> Result<()> {
-        let sp = savepoint(db, "migrate")?;
-        let version = user_version(&sp)?;
-        match version {
-            0 => {
-                create_rows(&sp)?;
-            }
-            _ => {}
-        }
-
-        set_user_version(&sp, 1)?;
-
-        Ok(())
-    }
-
     fn db(path: &str) -> Result<Sqlite> {
         let db = static_sqlite::open(path)?;
         let _ = execute(&db, "PRAGMA journal_mode = wal;", &[])?;
         let _ = execute(&db, "PRAGMA synchronous = normal;", &[])?;
         let _ = execute(&db, "PRAGMA foreign_keys = on;", &[])?;
+        let _ = execute(&db, "PRAGMA busy_timeout = 5000;", &[])?;
+        let _ = execute(&db, "PRAGMA cache_size = -64000;", &[])?;
+        let _ = execute(&db, "PRAGMA strict = on;", &[])?;
+
         Ok(db)
     }
 
@@ -114,7 +124,8 @@ mod tests {
     fn it_works() -> Result<()> {
         let db = db(":memory:")?;
 
-        let _ = migrate(&db)?;
+        let migrations = &[create_rows, create_users];
+        let _ = migrate(&db, migrations)?;
 
         let row = insert_row(
             &db,
@@ -135,7 +146,6 @@ mod tests {
         assert_eq!(
             row,
             Row {
-                id: 1,
                 not_null_text: "not_null_text".into(),
                 not_null_integer: 1,
                 not_null_real: 1.,

@@ -1,38 +1,13 @@
 # static_sqlite
 
-static_sqlite is a zero dependency way to map your sql to rust functions and structs easily.
-
-# Install
-
-```sh
-cargo add static_sqlite
-```
+An easy way to map sql to rust functions and structs
 
 # Quickstart
 
 ```rust
-use static_sqlite::{sql, Result, FromRow, savepoint};
+use static_sqlite::{sql, Result, migrate};
 
 sql! {
-    let create_migrations = r#"
-        create table if not exists migrations (version integer primary key)
-    "# as Migration;
-
-    let latest_migration = r#"
-        select version
-        from migrations
-        order by version desc
-        limit 1
-    "#;
-
-    let upsert_migration = r#"
-        insert into migrations (version)
-        values (?)
-        on conflict (version)
-        do update set version = excluded.version + 1
-        returning *
-    "#;
-
     let create_users = r#"
         create table users (
             id integer primary key,
@@ -48,24 +23,10 @@ sql! {
     "#;
 }
 
-fn migrate(db: &Sqlite) -> Result<()> {
-    let sp = savepoint(db, "migrate")?;
-    let _ = create_migrations(&sp)?;
-    let version = latest_migration(&sp)?.unwrap_or_default().version;
-    match version {
-        0 => {
-            let _ = create_users(&sp)?;
-        }
-        _ => {}
-    }
-    let _ = upsert_migrations(&sp, version + 1)?;
-
-    Ok(())
-}
-
 fn main() -> Result<()> {
     let db = static_sqlite::open("db.sqlite3")?;
-    let _ = migrate(&db);
+    let migrations = &[create_users];
+    migrate(&db, migrations);
 
     let user = insert_user(&db, "readme@example.com".into())?;
 
@@ -74,7 +35,13 @@ fn main() -> Result<()> {
 
 ```
 
-Treesitter injection for sql syntax highlighting:
+# Use
+
+```sh
+cargo add static_sqlite
+```
+
+# Treesitter injection in macro syntax highlighting
 
 ```
 ((macro_invocation
