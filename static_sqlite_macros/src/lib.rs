@@ -123,12 +123,9 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
             sql,
             in_cols,
             from,
+            ret,
             ..
         } => {
-            // let struct_ident = match &cast {
-            //     Cast::T(ident) | Cast::Vec(ident) => ident.clone(),
-            //     Cast::None => struct_ident(&ident),
-            // };
             let struct_ident = match from {
                 FromClause::Table(string) => {
                     if let Some(ct) = create_tables.iter().find(|ct| &ct.table_name == string) {
@@ -141,29 +138,21 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
             };
             let fn_args: Vec<TokenStream> = in_cols.iter().map(fn_tokens).collect();
             let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
-            // let (return_statement, return_type) = match ret {
-            //     QueryReturn::Row => (
-            //         quote! {
-            //             Ok(rows.last().unwrap().clone())
-            //         },
-            //         quote! { #struct_ident },
-            //     ),
-            //     QueryReturn::OptionRow => (
-            //         quote! {
-            //             Ok(rows.last().cloned())
-            //         },
-            //         quote! { Option<#struct_ident> },
-            //     ),
-            //     QueryReturn::Rows => (
-            //         quote! {
-            //             rows
-            //         },
-            //         quote! { Vec<#struct_ident> },
-            //     ),
-            // };
+            let (return_statement, return_type) = match ret {
+                QueryReturn::Row => (
+                    quote! { Ok(rows.last().unwrap().clone()) },
+                    quote! { #struct_ident },
+                ),
+                QueryReturn::OptionRow => (
+                    quote! { Ok(rows.last().cloned()) },
+                    quote! { Option<#struct_ident> },
+                ),
+                QueryReturn::Rows => (quote! { rows }, quote! { Vec<#struct_ident> }),
+            };
             quote! {
-                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<Vec<#struct_ident>> {
-                    db.query(#sql, &vec![#(#param_fields,)*])
+                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<#return_type> {
+                    let rows: Vec<#struct_ident> = db.query(#sql, &vec![#(#param_fields,)*])?;
+                    #return_statement
                 }
             }
         }

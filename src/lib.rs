@@ -33,7 +33,7 @@ mod tests {
             create table if not exists migrations (version integer primary key)
         "# as Migration;
 
-        let migrations = r#"
+        let latest_migration = r#"
             select version
             from migrations
             order by version desc
@@ -93,10 +93,7 @@ mod tests {
     fn migrate(db: &Sqlite) -> Result<()> {
         let sp = savepoint(db, "migrate")?;
         let _ = create_migrations(&sp)?;
-        let version = match migrations(&sp)?.first() {
-            Some(Migration { version }) => *version,
-            None => 0,
-        };
+        let version = latest_migration(&sp)?.unwrap_or_default().version;
         match version {
             0 => {
                 let _ = create_rows(&sp)?;
@@ -114,7 +111,7 @@ mod tests {
 
         let _ = migrate(&db)?;
 
-        let rows: Vec<Row> = insert_row(
+        let row = insert_row(
             &db,
             "not_null_text".into(),
             1,
@@ -131,7 +128,7 @@ mod tests {
         )?;
 
         assert_eq!(
-            rows.into_iter().nth(0).unwrap(),
+            row,
             Row {
                 id: 1,
                 not_null_text: "not_null_text".into(),

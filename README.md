@@ -10,8 +10,6 @@ cargo add static_sqlite
 
 # Quickstart
 
-In src/main.rs
-
 ```rust
 use static_sqlite::{sql, Result, FromRow, savepoint};
 
@@ -20,7 +18,7 @@ sql! {
         create table if not exists migrations (version integer primary key)
     "# as Migration;
 
-    let migrations = r#"
+    let latest_migration = r#"
         select version
         from migrations
         order by version desc
@@ -53,10 +51,7 @@ sql! {
 fn migrate(db: &Sqlite) -> Result<()> {
     let sp = savepoint(db, "migrate")?;
     let _ = create_migrations(&sp)?;
-    let version = match migrations(&sp)?.first() {
-        Some(Migration { version }) => *version,
-        None => 0,
-    };
+    let version = latest_migration(&sp)?.unwrap_or_default().version;
     match version {
         0 => {
             let _ = create_users(&sp)?;
