@@ -11,8 +11,7 @@ sql! {
     let create_users = r#"
         create table users (
             id integer primary key,
-            email text unique not null,
-            created_at integer not null default(unixepoch())
+            name text unique not null
         )
     "# as User;
 
@@ -28,11 +27,10 @@ fn main() -> Result<()> {
     let migrations = &[create_users];
     migrate(&db, migrations);
 
-    let user = insert_user(&db, "readme@example.com".into())?;
+    let user = insert_user(&db, "swlkr".into())?;
 
-    assert_eq!(User { id: 1, email: "readme@example.com".into(), created_at: 0 }, user)
+    assert_eq!(User { id: 1, name: "swlkr".into() }, user)
 }
-
 ```
 
 # Use

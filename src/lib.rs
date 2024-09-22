@@ -129,15 +129,15 @@ mod tests {
 
         let row = insert_row(
             &db,
-            "not_null_text".into(),
+            "not_null_text",
             1,
             1.0,
             vec![0xBE, 0xEF],
+            None::<String>,
             None,
             None,
             None,
-            None,
-            Some("nullable_text".into()),
+            Some("nullable_text"),
             Some(2),
             Some(2.0),
             Some(vec![0xFE, 0xED]),

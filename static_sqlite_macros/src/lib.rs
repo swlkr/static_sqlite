@@ -1164,7 +1164,19 @@ fn name_struct_self_tokens(column: &Column) -> TokenStream {
 
 fn param_tokens(column: &Column) -> TokenStream {
     let name = syn::Ident::new(&column.name, proc_macro2::Span::call_site());
-    quote!(#name.into())
+    match column.data_type {
+        DataType::Text => quote!(#name.to_string().into()),
+        DataType::Null(ref dt) => match &**dt {
+            DataType::Text => quote! {
+                match #name {
+                    Some(val) => val.to_string().into(),
+                    None => static_sqlite::Value::Null
+                }
+            },
+            _ => quote!(#name.into()),
+        },
+        _ => quote!(#name.into()),
+    }
 }
 
 fn match_tokens(column: &Column) -> TokenStream {
@@ -1186,9 +1198,8 @@ fn fn_type(data_type: &DataType) -> TokenStream {
     match data_type {
         DataType::Integer => quote!(i64),
         DataType::Real => quote!(f64),
-        DataType::Text => quote!(String),
-        DataType::Blob => quote!(Vec<u8>),
-        DataType::Any => quote!(Vec<u8>),
+        DataType::Text => quote!(impl std::fmt::Display),
+        DataType::Blob | DataType::Any => quote!(Vec<u8>),
         DataType::Null(dt) => {
             let dt = fn_type(&*dt);
             quote!(Option<#dt>)
