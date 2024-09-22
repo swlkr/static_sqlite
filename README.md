@@ -39,7 +39,7 @@ fn main() -> Result<()> {
 cargo add static_sqlite
 ```
 
-# Treesitter injection in macro syntax highlighting
+# Treesitter
 
 ```
 ((macro_invocation
