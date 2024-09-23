@@ -63,13 +63,13 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Sqlite {
     db: *mut c_void,
 }
 
 impl Sqlite {
-    pub(crate) fn open(path: &str) -> Result<Self> {
+    pub fn open(path: &str) -> Result<Self> {
         let c_path = CString::new(path)?;
         let mut db: *mut c_void = std::ptr::null_mut();
 
@@ -85,7 +85,7 @@ impl Sqlite {
         Ok(Sqlite { db })
     }
 
-    pub(crate) fn prepare(&self, sql: &str, params: &[Value]) -> Result<*mut c_void> {
+    pub fn prepare(&self, sql: &str, params: &[Value]) -> Result<*mut c_void> {
         let c_sql = CString::new(sql)?;
         let mut stmt: *mut c_void = std::ptr::null_mut();
         unsafe {
@@ -134,7 +134,7 @@ impl Sqlite {
         }
     }
 
-    pub(crate) fn execute(&self, sql: &str, params: &[Value]) -> Result<i32> {
+    pub fn execute(&self, sql: &str, params: &[Value]) -> Result<i32> {
         unsafe {
             let stmt = self.prepare(sql, params)?;
 
@@ -160,7 +160,7 @@ impl Sqlite {
         }
     }
 
-    pub(crate) fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
+    pub fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
         unsafe {
             let stmt = self.prepare(sql, params)?;
             let mut rows = Vec::new();
@@ -204,7 +204,7 @@ impl Sqlite {
         }
     }
 
-    pub(crate) fn rows(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<(String, Value)>>> {
+    pub fn rows(&self, sql: &str, params: &[Value]) -> Result<Vec<Vec<(String, Value)>>> {
         unsafe {
             let stmt = self.prepare(sql, params)?;
             let mut rows = Vec::new();
@@ -247,11 +247,7 @@ impl Sqlite {
         }
     }
 
-    pub(crate) fn savepoint<'a>(
-        &'a self,
-        sqlite: &'a Sqlite,
-        name: &'a str,
-    ) -> Result<Savepoint<'a>> {
+    pub fn savepoint<'a>(&'a self, sqlite: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
         Savepoint::new(sqlite, name)
     }
 }
@@ -271,13 +267,13 @@ pub struct Savepoint<'a> {
 }
 
 impl<'a> Savepoint<'a> {
-    pub(crate) fn new(sqlite: &'a Sqlite, name: &'a str) -> Result<Self> {
+    pub fn new(sqlite: &'a Sqlite, name: &'a str) -> Result<Self> {
         let sql = format!("savepoint {}", name);
         let _stmt = sqlite.prepare(&sql, &[])?;
         Ok(Self { sqlite, name })
     }
 
-    pub(crate) fn release(&self) -> Result<()> {
+    pub fn release(&self) -> Result<()> {
         let sql = format!("release savepoint {}", self.name);
         let _stmt = self.prepare(&sql, &[])?;
         Ok(())
