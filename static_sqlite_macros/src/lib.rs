@@ -147,7 +147,7 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
                     quote! { Ok(rows.last().cloned()) },
                     quote! { Option<#struct_ident> },
                 ),
-                QueryReturn::Rows => (quote! { rows }, quote! { Vec<#struct_ident> }),
+                QueryReturn::Rows => (quote! { Ok(rows) }, quote! { Vec<#struct_ident> }),
             };
             quote! {
                 fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<#return_type> {

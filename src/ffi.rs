@@ -7,10 +7,10 @@ use std::{
 
 #[link(name = "sqlite3")]
 extern "C" {
-    fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut c_void) -> c_int;
-    fn sqlite3_close(db: *mut c_void) -> c_int;
+    fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut c_int) -> c_int;
+    fn sqlite3_close(db: *mut c_int) -> c_int;
     fn sqlite3_prepare_v2(
-        db: *mut c_void,
+        db: *mut c_int,
         zSql: *const c_char,
         nByte: c_int,
         ppStmt: *mut *mut c_void,
@@ -35,7 +35,7 @@ extern "C" {
     fn sqlite3_bind_null(stmt: *mut c_void, index: c_int) -> c_int;
     fn sqlite3_step(stmt: *mut c_void) -> c_int;
     fn sqlite3_finalize(stmt: *mut c_void) -> c_int;
-    fn sqlite3_errmsg(db: *mut c_void) -> *const c_char;
+    fn sqlite3_errmsg(db: *mut c_int) -> *const c_char;
     fn sqlite3_column_count(stmt: *mut c_void) -> c_int;
     fn sqlite3_column_type(stmt: *mut c_void, iCol: c_int) -> c_int;
     fn sqlite3_column_name(stmt: *mut c_void, N: c_int) -> *const c_char;
@@ -43,7 +43,7 @@ extern "C" {
     fn sqlite3_column_double(stmt: *mut c_void, iCol: c_int) -> f64;
     fn sqlite3_column_text(stmt: *mut c_void, iCol: c_int) -> *const u8;
     fn sqlite3_column_bytes(stmt: *mut c_void, iCol: c_int) -> c_int;
-    fn sqlite3_changes(db: *mut c_void) -> c_int;
+    fn sqlite3_changes(db: *mut c_int) -> c_int;
 }
 
 const SQLITE_ROW: i32 = 100;
@@ -59,19 +59,24 @@ pub enum Error {
     TryFromInt(#[from] TryFromIntError),
     #[error("sqlite error: {0}")]
     Sqlite(String),
+    #[error("sqlite file closed")]
+    ConnectionClosed,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub struct Sqlite {
-    db: *mut c_void,
+    db: *mut core::ffi::c_int,
 }
+
+unsafe impl Sync for Sqlite {}
+unsafe impl Send for Sqlite {}
 
 impl Sqlite {
     pub fn open(path: &str) -> Result<Self> {
         let c_path = CString::new(path)?;
-        let mut db: *mut c_void = std::ptr::null_mut();
+        let mut db: *mut i32 = core::ptr::null_mut();
 
         unsafe {
             if sqlite3_open(c_path.as_ptr(), &mut db) != 0 {

@@ -12,7 +12,11 @@ pub fn execute(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<i32> {
     conn.execute(sql, params)
 }
 
-pub fn query<T: FromRow>(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<Vec<T>> {
+pub fn query<T: FromRow + Send + 'static>(
+    conn: &Sqlite,
+    sql: &str,
+    params: &[Value],
+) -> Result<Vec<T>> {
     conn.query(sql, params)
 }
 
