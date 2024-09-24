@@ -25,7 +25,7 @@ sql! {
 fn main() -> Result<()> {
     let db = static_sqlite::open("db.sqlite3")?;
     let migrations = &[create_users];
-    migrate(&db, migrations);
+    migrate(&db, migrations)?;
 
     let user = insert_user(&db, "swlkr")?;
 
