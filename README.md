@@ -36,7 +36,7 @@ fn main() -> Result<()> {
 # Use
 
 ```sh
-cargo add --git https:://github.com/swlkr/static_sqlite
+cargo add --git https://github.com/swlkr/static_sqlite
 ```
 
 # Treesitter
