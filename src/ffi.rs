@@ -139,9 +139,9 @@ impl Sqlite {
         }
     }
 
-    pub fn execute(&self, sql: &str, params: &[Value]) -> Result<i32> {
+    pub fn execute(&self, sql: &str, params: Vec<Value>) -> Result<i32> {
         unsafe {
-            let stmt = self.prepare(sql, params)?;
+            let stmt = self.prepare(&sql, &params)?;
 
             loop {
                 let code = sqlite3_step(stmt);
@@ -163,6 +163,10 @@ impl Sqlite {
             let changes = sqlite3_changes(self.db);
             Ok(changes)
         }
+    }
+
+    pub fn execute_all(&self, sql: &str) -> Result<i32> {
+        self.execute(sql, vec![])
     }
 
     pub fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
@@ -272,7 +276,7 @@ pub struct Savepoint<'a> {
 }
 
 impl<'a> Savepoint<'a> {
-    pub fn new(sqlite: &'a Sqlite, name: &'a str) -> Result<Self> {
+    pub fn new(sqlite: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
         let sql = format!("savepoint {}", name);
         let _stmt = sqlite.prepare(&sql, &[])?;
         Ok(Self { sqlite, name })
@@ -299,6 +303,7 @@ impl<'a> Drop for Savepoint<'a> {
     }
 }
 
+#[derive(Clone)]
 pub enum Value {
     Text(String),
     Integer(i64),

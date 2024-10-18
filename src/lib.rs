@@ -1,67 +1,17 @@
-pub use ffi::{Error, FromRow, Result, Savepoint, Sqlite, Value};
+pub use ffi::{Error, FromRow, Result, Savepoint, Value};
 pub use static_sqlite_macros::sql;
 extern crate self as static_sqlite;
 
 mod ffi;
+mod sync;
+mod tokio;
 
-pub fn open(path: &str) -> Result<Sqlite> {
-    Sqlite::open(path)
-}
-
-pub fn execute(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<i32> {
-    conn.execute(sql, params)
-}
-
-pub fn query<T: FromRow + Send + 'static>(
-    conn: &Sqlite,
-    sql: &str,
-    params: &[Value],
-) -> Result<Vec<T>> {
-    conn.query(sql, params)
-}
-
-pub fn rows(conn: &Sqlite, sql: &str, params: &[Value]) -> Result<Vec<Vec<(String, Value)>>> {
-    conn.rows(sql, params)
-}
-
-pub fn savepoint<'a>(conn: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
-    conn.savepoint(conn, name)
-}
-
-fn user_version(db: &Sqlite) -> Result<i64> {
-    let rws = rows(&db, "PRAGMA user_version", &[])?;
-    match rws.into_iter().nth(0) {
-        Some(cols) => match cols.into_iter().nth(0) {
-            Some(pair) => pair.1.try_into(),
-            None => Ok(0),
-        },
-        None => Ok(0),
-    }
-}
-
-fn set_user_version(db: &Sqlite, version: usize) -> Result<()> {
-    let _ = execute(&db, &format!("PRAGMA user_version = {version}"), &[])?;
-    Ok(())
-}
-
-pub fn migrate<F>(db: &Sqlite, migrations: &[F]) -> Result<()>
-where
-    F: Fn(&Sqlite) -> Result<()>,
-{
-    let sp = savepoint(db, "migrate")?;
-    let version = user_version(&sp)?;
-    let pending_migrations = &migrations[(version as usize)..];
-    for migration in pending_migrations {
-        migration(&sp)?;
-    }
-    set_user_version(&sp, migrations.len())?;
-
-    Ok(())
-}
+pub use sync::migrate;
+pub use tokio::*;
 
 #[cfg(test)]
 mod tests {
-    use super::{execute, migrate, sql, Result, Sqlite};
+    use super::{migrate, sql, Result, Sqlite};
 
     sql! {
         let create_users = r#"
@@ -112,27 +62,36 @@ mod tests {
         "#;
     }
 
-    fn db(path: &str) -> Result<Sqlite> {
-        let db = static_sqlite::open(path)?;
-        let _ = execute(&db, "PRAGMA journal_mode = wal;", &[])?;
-        let _ = execute(&db, "PRAGMA synchronous = normal;", &[])?;
-        let _ = execute(&db, "PRAGMA foreign_keys = on;", &[])?;
-        let _ = execute(&db, "PRAGMA busy_timeout = 5000;", &[])?;
-        let _ = execute(&db, "PRAGMA cache_size = -64000;", &[])?;
-        let _ = execute(&db, "PRAGMA strict = on;", &[])?;
+    async fn db(path: &str) -> Result<Sqlite> {
+        let sqlite = static_sqlite::open(path).await?;
+        sqlite.call(|db| {
+            db.execute_all(
+                r#"
+                    PRAGMA journal_mode = wal;
+                    PRAGMA synchronous = normal;
+                    PRAGMA foreign_keys = on;
+                    PRAGMA busy_timeout = 5000;
+                    PRAGMA cache_size = -64000;
+                    PRAGMA strict = on;
+                "#
+            )?;
 
-        Ok(db)
+            let migrations = &[
+                create_rows,
+                create_users
+            ];
+            migrate(db, migrations)
+        }).await?;
+
+        Ok(sqlite)
     }
 
-    #[test]
-    fn it_works() -> Result<()> {
-        let db = db(":memory:")?;
-
-        let migrations = &[create_rows, create_users];
-        let _ = migrate(&db, migrations)?;
+    #[tokio::test]
+    async fn it_works() -> Result<()> {
+        let db = db(":memory:").await?;
 
         let row = insert_row(
-            &db,
+            db,
             "not_null_text",
             1,
             1.0,
@@ -145,7 +104,7 @@ mod tests {
             Some(2),
             Some(2.0),
             Some(vec![0xFE, 0xED]),
-        )?;
+        ).await?;
 
         assert_eq!(
             row,
