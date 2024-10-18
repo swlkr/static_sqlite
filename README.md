@@ -22,14 +22,20 @@ sql! {
     "#;
 }
 
-fn main() -> Result<()> {
-    let db = static_sqlite::open("db.sqlite3")?;
-    let migrations = &[create_users];
-    migrate(&db, migrations)?;
+#[tokio::main]
+async fn main() -> Result<()> {
+    let sqlite = static_sqlite::open("db.sqlite3").await?;
+    sqlite.call(|db| {
+      let migrations = &[create_users];
+      migrate(db, migrations)
+    }).await?;
 
-    let user = insert_user(&db, "swlkr")?;
+    let user = insert_user(sqlite, "swlkr").await?;
 
-    assert_eq!(User { id: 1, name: "swlkr".into() }, user)
+    assert_eq!(user.id, 1);
+    assert_eq!(user.name, "swlkr");
+
+    Ok(())
 }
 ```
 
