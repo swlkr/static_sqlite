@@ -80,7 +80,7 @@ fn to_tokens(output: Output) -> TokenStream {
 fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
     match output {
         Stmt::ExecuteBatch { ident, sql } => quote! {
-            fn #ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
+            pub fn #ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
                 db.execute(#sql, &[]);
 
                 Ok(())
@@ -96,7 +96,7 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
             let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
 
             quote! {
-                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<usize> {
+                pub fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<usize> {
                     db.execute(#sql, vec![#(#param_fields,)*])
                 }
             }
@@ -110,7 +110,7 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
             let param_fields: Vec<TokenStream> = in_cols.iter().map(param_tokens).collect();
 
             quote! {
-                 fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<i64> {
+                 pub fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<i64> {
                     let rows = db.rows(#sql, vec![#(#param_fields,)*])
                     let result: i64 = rows.nth(0).expect("count(*) expected").1.try_into()?;
 
@@ -150,7 +150,7 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
                 QueryReturn::Rows => (quote! { Ok(rows) }, quote! { Vec<#struct_ident> }),
             };
             quote! {
-                fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<#return_type> {
+                pub fn #ident(db: &static_sqlite::Sqlite, #(#fn_args,)*) -> static_sqlite::Result<#return_type> {
                     let rows: Vec<#struct_ident> = db.query(#sql, &vec![#(#param_fields,)*])?;
                     #return_statement
                 }
@@ -158,7 +158,7 @@ fn impl_tokens(create_tables: &Vec<CreateTable>, output: &Stmt) -> TokenStream {
         }
         Stmt::CreateTable { sql, fn_ident, .. } => {
             quote! {
-                fn #fn_ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
+                pub fn #fn_ident(db: &static_sqlite::Sqlite) -> static_sqlite::Result<()> {
                     let _ = db.execute(#sql, &[])?;
 
                     Ok(())
