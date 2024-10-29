@@ -59,8 +59,12 @@ pub enum Error {
     TryFromInt(#[from] TryFromIntError),
     #[error("sqlite error: {0}")]
     Sqlite(String),
+    #[error("UNIQUE constraint failed: {0}")]
+    UniqueConstraint(String),
     #[error("sqlite file closed")]
     ConnectionClosed,
+    #[error("sqlite row not found")]
+    RowNotFound,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -158,7 +162,12 @@ impl Sqlite {
                 }
             }
 
-            sqlite3_finalize(stmt);
+            if sqlite3_finalize(stmt) != 0 {
+                let error = CStr::from_ptr(sqlite3_errmsg(self.db))
+                    .to_string_lossy()
+                    .into_owned();
+                return Err(Error::Sqlite(error));
+            }
 
             let changes = sqlite3_changes(self.db);
             Ok(changes)
@@ -207,7 +216,19 @@ impl Sqlite {
                 let row = T::from_row(values)?;
                 rows.push(row);
             }
-            sqlite3_finalize(stmt);
+
+            if sqlite3_finalize(stmt) != 0 {
+                let error = CStr::from_ptr(sqlite3_errmsg(self.db))
+                    .to_string_lossy()
+                    .into_owned();
+                if error.starts_with("UNIQUE constraint failed: ") {
+                    return Err(Error::UniqueConstraint(
+                        error.replace("UNIQUE constraint failed: ", ""),
+                    ));
+                } else {
+                    return Err(Error::Sqlite(error));
+                }
+            }
 
             Ok(rows)
         }
@@ -250,7 +271,19 @@ impl Sqlite {
 
                 rows.push(values);
             }
-            sqlite3_finalize(stmt);
+
+            if sqlite3_finalize(stmt) != 0 {
+                let error = CStr::from_ptr(sqlite3_errmsg(self.db))
+                    .to_string_lossy()
+                    .into_owned();
+                if error.starts_with("UNIQUE constraint failed: ") {
+                    return Err(Error::UniqueConstraint(
+                        error.replace("UNIQUE constraint failed: ", ""),
+                    ));
+                } else {
+                    return Err(Error::Sqlite(error));
+                }
+            }
 
             Ok(rows)
         }
@@ -303,7 +336,7 @@ impl<'a> Drop for Savepoint<'a> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Text(String),
     Integer(i64),

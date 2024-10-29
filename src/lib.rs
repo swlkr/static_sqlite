@@ -2,96 +2,148 @@ pub use ffi::{Error, FromRow, Result, Savepoint, Value};
 pub use static_sqlite_macros::sql;
 extern crate self as static_sqlite;
 
-mod ffi;
-mod sync;
-mod tokio;
+pub mod ffi;
+pub mod sync;
+pub mod tokio;
 
-pub use sync::migrate;
+pub use sync::savepoint;
 pub use tokio::*;
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate, sql, Result, Sqlite};
+    use super::{Sqlite, sql, Result};
 
-    sql! {
-        let create_users = r#"
-            create table users (
-                id integer not null primary key,
-                email text not null unique
-            )
-        "# as User;
+    #[tokio::test]
+    async fn migrate_table_works() -> Result<()> {
+        sql! {
+            let migrate = r#"
+                create table User (
+                    id integer primary key,
+                    email text unique not null
+                );
 
-        let create_rows = r#"
-            create table rows (
-                not_null_text text not null,
-                not_null_integer integer not null,
-                not_null_real real not null,
-                not_null_blob blob not null,
-                null_text text,
-                null_integer integer,
-                null_real real,
-                null_blob blob,
-                nullable_text text,
-                nullable_integer integer,
-                nullable_real real,
-                nullable_blob blob
-            )
-        "# as Row;
+                alter table User add column created_at integer;
+            "#;
 
-        let insert_row = r#"
-            insert into rows (
-                not_null_text,
-                not_null_integer,
-                not_null_real,
-                not_null_blob,
-                null_text,
-                null_integer,
-                null_real,
-                null_blob,
-                nullable_text,
-                nullable_integer,
-                nullable_real,
-                nullable_blob
-            )
-            values (
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?
-            )
-            returning *
-        "#;
+            let insert_user = r#"
+                insert into User (email) values (?) on conflict (email) do update set email = excluded.email returning *
+            "#;
+
+            let insert_user_created = r#"
+                insert into User (email, created_at) values (?, ?) on conflict (email) do update set email = excluded.email returning *
+            "#;
+        }
+
+        let db = static_sqlite::open(":memory:").await?;
+        let _k= migrate(&db).await?;
+        let email = "s@s.com";
+        let user= insert_user(&db, email).await?;
+
+        assert_eq!(user.id, 1);
+        assert_eq!(user.email, "s@s.com");
+
+        let email = "f@f.com";
+        let user= insert_user_created(&db, email, Some(1)).await?;
+
+        assert_eq!(user.id, 2);
+        assert_eq!(user.email, "f@f.com");
+        assert_eq!(user.created_at, Some(1));
+
+        Ok(())
     }
 
-    async fn db(path: &str) -> Result<Sqlite> {
-        let sqlite = static_sqlite::open(path).await?;
-        sqlite.call(|db| {
-            db.execute_all(
-                r#"
-                    PRAGMA journal_mode = wal;
-                    PRAGMA synchronous = normal;
-                    PRAGMA foreign_keys = on;
-                    PRAGMA busy_timeout = 5000;
-                    PRAGMA cache_size = -64000;
-                    PRAGMA strict = on;
-                "#
-            )?;
+    #[tokio::test]
+    async fn option_type_works() -> Result<()> {
+        sql! {
+            let migrate = r#"
+                create table Row (
+                    txt text
+                )
+            "#;
 
-            let migrations = &[
-                create_rows,
-                create_users
-            ];
-            migrate(db, migrations)
-        }).await?;
+            let insert_row = r#"
+                insert into Row (txt) values (?) returning *
+            "#;
+        }
 
-        Ok(sqlite)
+        let db = static_sqlite::open(":memory:").await?;
+        let _k = migrate(&db).await?;
+        let txt = Some("txt");
+        let row = insert_row(&db, txt).await?;
+
+        assert_eq!(row.txt, Some("txt".into()));
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn it_works() -> Result<()> {
+        sql! {
+            let migrations = r#"
+                create table User (
+                    id integer primary key,
+                    email text not null unique
+                );
+
+                create table Row (
+                    not_null_text text not null,
+                    not_null_integer integer not null,
+                    not_null_real real not null,
+                    not_null_blob blob not null,
+                    null_text text,
+                    null_integer integer,
+                    null_real real,
+                    null_blob blob
+                );
+
+                alter table Row add column nullable_text text;
+                alter table Row add column nullable_integer integer;
+                alter table Row add column nullable_real real;
+                alter table Row add column nullable_blob blob;
+            "#;
+
+            let insert_row = r#"
+                insert into Row (
+                    not_null_text,
+                    not_null_integer,
+                    not_null_real,
+                    not_null_blob,
+                    null_text,
+                    null_integer,
+                    null_real,
+                    null_blob,
+                    nullable_text,
+                    nullable_integer,
+                    nullable_real,
+                    nullable_blob
+                )
+                values (
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?, ?
+                )
+                returning *
+            "#;
+        }
+
+        async fn db(path: &str) -> Result<Sqlite> {
+            let sqlite = static_sqlite::open(path).await?;
+            static_sqlite::execute_all(&sqlite, r#"
+                pragma journal_mode = wal;
+                pragma synchronous = normal;
+                pragma foreign_keys = on;
+                pragma busy_timeout = 5000;
+                pragma cache_size = -64000;
+                pragma strict = on;
+            "#).await?;
+            migrations(&sqlite).await?;
+            Ok(sqlite)
+        }
+
         let db = db(":memory:").await?;
 
         let row = insert_row(
-            db,
+            &db,
             "not_null_text",
             1,
             1.0,
@@ -123,6 +175,39 @@ mod tests {
                 nullable_blob: Some(vec![0xFE, 0xED]),
             }
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn readme_works() -> Result<()> {
+        sql! {
+            let migrate = r#"
+                create table User (
+                    id integer primary key,
+                    name text unique not null
+                );
+
+                alter table User
+                add column created_at integer;
+
+                alter table User
+                drop column created_at;
+            "#;
+
+            let insert_user = r#"
+                insert into User (name)
+                values (?)
+                returning *
+            "#;
+        }
+
+        let db = static_sqlite::open(":memory:").await?;
+        let _ = migrate(&db).await?;
+        let user = insert_user(&db, "swlkr").await?;
+
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "swlkr");
 
         Ok(())
     }

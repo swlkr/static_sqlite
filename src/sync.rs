@@ -10,6 +10,10 @@ pub fn execute(conn: &Sqlite, sql: &str, params: Vec<Value>) -> Result<i32> {
     conn.execute(sql, params)
 }
 
+pub fn execute_all(conn: &Sqlite, sql: &str) -> Result<i32> {
+    conn.execute(sql, vec![])
+}
+
 #[allow(unused)]
 pub fn query<T: FromRow + Send + 'static>(
     conn: &Sqlite,

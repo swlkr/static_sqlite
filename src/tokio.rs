@@ -113,12 +113,13 @@ where
         .map(|_| Sqlite { sender })
 }
 
-pub async fn execute(conn: Sqlite, sql: String, params: Vec<Value>) -> Result<i32> {
+pub async fn execute(conn: &Sqlite, sql: String, params: Vec<Value>) -> Result<i32> {
     conn.call(move |conn| conn.execute(&sql, params)).await
 }
 
-pub async fn execute_all(conn: Sqlite, sql: &'static str) -> Result<i32> {
-    conn.call(move |conn| conn.execute(&sql, vec![])).await
+pub async fn execute_all(conn: &Sqlite, sql: &'static str) -> Result<()> {
+    let _ = conn.call(move |conn| conn.execute(sql, vec![])).await;
+    Ok(())
 }
 
 pub async fn query<T: FromRow + Send + 'static>(

@@ -5,18 +5,24 @@ An easy way to map sql to rust functions and structs
 # Quickstart
 
 ```rust
-use static_sqlite::{sql, Result, migrate};
+use static_sqlite::{sql, Result, self};
 
 sql! {
-    let create_users = r#"
-        create table users (
+    let migrate = r#"
+        create table User (
             id integer primary key,
             name text unique not null
-        )
-    "# as User;
+        );
+
+        alter table User
+        add column created_at integer;
+
+        alter table User
+        drop column created_at;
+    "#;
 
     let insert_user = r#"
-        insert into users (email)
+        insert into User (name)
         values (?)
         returning *
     "#;
@@ -24,13 +30,9 @@ sql! {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let sqlite = static_sqlite::open("db.sqlite3").await?;
-    sqlite.call(|db| {
-      let migrations = &[create_users];
-      migrate(db, migrations)
-    }).await?;
-
-    let user = insert_user(sqlite, "swlkr").await?;
+    let db = static_sqlite::open("db.sqlite3").await?;
+    let _ = migrate(&db).await?;
+    let user = insert_user(&db, "swlkr").await?;
 
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr");
