@@ -211,4 +211,52 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn crud_works() -> Result<()> {
+        sql! {
+            let migrate = r#"
+                create table User (
+                    id integer primary key,
+                    name text unique not null
+                );
+            "#;
+
+            let insert_user = r#"
+                insert into User (name)
+                values (?)
+                returning *
+            "#;
+
+            let update_user = r#"
+                update User set name = ? where id = ? returning *
+            "#;
+
+            // let delete_user = r#"
+            //     delete * from User where id = ? returning *
+            // "#;
+
+            // let users = r#"
+            //     select * from User
+            // "#;
+        }
+
+        let db = static_sqlite::open(":memory:").await?;
+        let _ = migrate(&db).await?;
+        let user = insert_user(&db, "swlkr").await?;
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "swlkr");
+
+        let user = update_user(&db, "swlkr2", 1).await?;
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "swlkr2");
+
+//         let _ = delete_user(&db, "swlkr").await?;
+//         let users = users(&db).await?;
+
+//         assert_eq!(users.len(), 0);
+
+
+        Ok(())
+    }
 }

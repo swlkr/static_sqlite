@@ -22,8 +22,7 @@ pub struct Sqlite {
 
 impl Sqlite {
     pub async fn close(self) -> Result<()> {
-        let (sender, receiver) =
-            oneshot::channel::<std::result::Result<(), crate::Error>>();
+        let (sender, receiver) = oneshot::channel::<std::result::Result<(), crate::Error>>();
 
         if let Err(crossbeam_channel::SendError(_)) = self.sender.send(Message::Close(sender)) {
             return Ok(());
@@ -54,9 +53,7 @@ impl Sqlite {
             })))
             .map_err(|_| crate::Error::ConnectionClosed)?;
 
-        receiver
-            .await
-            .map_err(|_| crate::Error::ConnectionClosed)?
+        receiver.await.map_err(|_| crate::Error::ConnectionClosed)?
     }
 }
 
@@ -127,11 +124,13 @@ pub async fn query<T: FromRow + Send + 'static>(
     sql: &'static str,
     params: &'static [Value],
 ) -> Result<Vec<T>> {
-    conn.call(|conn| { 
-        conn.query(sql, params)
-    }).await
+    conn.call(|conn| conn.query(sql, params)).await
 }
 
-pub async fn rows(conn: Sqlite, sql: &'static str, params: &'static [Value]) -> Result<Vec<Vec<(String, Value)>>> {
+pub async fn rows(
+    conn: Sqlite,
+    sql: &'static str,
+    params: &'static [Value],
+) -> Result<Vec<Vec<(String, Value)>>> {
     conn.call(|conn| conn.rows(sql, params)).await
 }
