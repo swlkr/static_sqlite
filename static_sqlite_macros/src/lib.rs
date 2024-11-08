@@ -117,7 +117,7 @@ fn fn_tokens(schema_columns: &Vec<schema::Column>, expr: &SqlExpr) -> Result<Tok
     let columns = stmt_columns(span, schema_columns, statement)?;
 
     let tokens = match &statement {
-        Statement::Insert { .. } | Statement::Update { .. } => {
+        Statement::Insert { .. } | Statement::Update { .. } | Statement::Delete { .. } => {
             let generic = match fn_generic(&statement) {
                 Some(generic) => quote! { #generic },
                 None => quote! { () },
@@ -235,6 +235,31 @@ fn fn_generic(stmt: &sqlparser::ast::Statement) -> Option<Ident> {
                 None => None,
             }
         }
+        Statement::Delete {
+            returning, from, ..
+        } => {
+            let table_name = match from.first() {
+                Some(TableWithJoins {
+                    relation:
+                        TableFactor::Table {
+                            name: ObjectName(parts),
+                            ..
+                        },
+                    ..
+                }) => ident_from(parts.last()),
+                _ => todo!("fn_generic update table not implemented yet"),
+            };
+            match returning {
+                Some(cols) => match &cols[..] {
+                    [SelectItem::QualifiedWildcard(ObjectName(parts), _)] => {
+                        ident_from(parts.last())
+                    }
+                    [SelectItem::Wildcard(_)] => table_name,
+                    _ => todo!("fn_generic insert statement returning"),
+                },
+                None => None,
+            }
+        }
         _ => todo!("fn_generic other statements"),
     }
 }
@@ -336,6 +361,19 @@ fn return_ty(stmt: &sqlparser::ast::Statement) -> TokenStream {
                 ..
             } => return_ty_from_returning_or_parts(returning, parts),
             _ => todo!("return_ty update relation TableFactor"),
+        },
+        Statement::Delete {
+            from, returning, ..
+        } => match from.first() {
+            Some(TableWithJoins {
+                relation:
+                    TableFactor::Table {
+                        name: ObjectName(parts),
+                        ..
+                    },
+                ..
+            }) => return_ty_from_returning_or_parts(returning, parts),
+            _ => todo!("return_ty delete without a from"),
         },
         _ => todo!("return_ty other statements"),
     }
@@ -486,6 +524,45 @@ fn stmt_columns<'a>(
                 .collect::<Result<Vec<_>>>()?;
 
             Ok(out)
+        }
+        Statement::Delete {
+            from, selection, ..
+        } => {
+            let table = match from.first() {
+                Some(TableWithJoins {
+                    relation:
+                        TableFactor::Table {
+                            name: table_name, ..
+                        },
+                    ..
+                }) => table_name,
+                _ => {
+                    return Err(Error::new(
+                        span,
+                        "delete statement requires a table in from clause",
+                    ))
+                }
+            };
+
+            let cols = match selection {
+                Some(expr) => extract_columns_from_binary_op(expr),
+                None => vec![],
+            };
+
+            cols.iter()
+                .map(|col| {
+                    let schema_col = schema_columns
+                        .iter()
+                        .find(|sc| &sc.name == col && &sc.table == table);
+                    match schema_col {
+                        Some(schema_col) => Ok(schema_col),
+                        None => Err(Error::new(
+                            span,
+                            format!("Table {} does not have column {}", table, col),
+                        )),
+                    }
+                })
+                .collect::<Result<Vec<_>>>()
         }
         _ => todo!("columns from statement for other statements"),
     }

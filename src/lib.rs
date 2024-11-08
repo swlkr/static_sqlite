@@ -232,9 +232,9 @@ mod tests {
                 update User set name = ? where id = ? returning *
             "#;
 
-            // let delete_user = r#"
-            //     delete * from User where id = ? returning *
-            // "#;
+            let delete_user = r#"
+                delete from User where id = ? returning *
+            "#;
 
             // let users = r#"
             //     select * from User
@@ -251,8 +251,8 @@ mod tests {
         assert_eq!(user.id, 1);
         assert_eq!(user.name, "swlkr2");
 
-//         let _ = delete_user(&db, "swlkr").await?;
-//         let users = users(&db).await?;
+        let _ = delete_user(&db, 1).await?;
+        // let users = users(&db).await?;
 
 //         assert_eq!(users.len(), 0);
 
