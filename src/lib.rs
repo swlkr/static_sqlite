@@ -9,9 +9,15 @@ pub mod tokio;
 pub use sync::savepoint;
 pub use tokio::*;
 
+impl FromRow for () {
+    fn from_row(_columns: Vec<(String, Value)>) -> Result<Self> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Sqlite, sql, Result};
+    use super::{sql, Result, Sqlite};
 
     #[tokio::test]
     async fn migrate_table_works() -> Result<()> {
@@ -26,7 +32,7 @@ mod tests {
             "#;
 
             let insert_user = r#"
-                insert into User (email) values (?) on conflict (email) do update set email = excluded.email returning *
+                insert into User (email) values (?) on conflict (email) do update set email = excluded.email
             "#;
 
             let insert_user_created = r#"
@@ -35,15 +41,12 @@ mod tests {
         }
 
         let db = static_sqlite::open(":memory:").await?;
-        let _k= migrate(&db).await?;
+        migrate(&db).await?;
         let email = "s@s.com";
-        let user= insert_user(&db, email).await?;
-
-        assert_eq!(user.id, 1);
-        assert_eq!(user.email, "s@s.com");
+        insert_user(&db, email).await?;
 
         let email = "f@f.com";
-        let user= insert_user_created(&db, email, Some(1)).await?;
+        let user = insert_user_created(&db, email, Some(1)).await?;
 
         assert_eq!(user.id, 2);
         assert_eq!(user.email, "f@f.com");
@@ -128,14 +131,18 @@ mod tests {
 
         async fn db(path: &str) -> Result<Sqlite> {
             let sqlite = static_sqlite::open(path).await?;
-            static_sqlite::execute_all(&sqlite, r#"
+            static_sqlite::execute_all(
+                &sqlite,
+                r#"
                 pragma journal_mode = wal;
                 pragma synchronous = normal;
                 pragma foreign_keys = on;
                 pragma busy_timeout = 5000;
                 pragma cache_size = -64000;
                 pragma strict = on;
-            "#).await?;
+            "#,
+            )
+            .await?;
             migrations(&sqlite).await?;
             Ok(sqlite)
         }
@@ -156,7 +163,8 @@ mod tests {
             Some(2),
             Some(2.0),
             Some(vec![0xFE, 0xED]),
-        ).await?;
+        )
+        .await?;
 
         assert_eq!(
             row,
@@ -233,12 +241,12 @@ mod tests {
             "#;
 
             let delete_user = r#"
-                delete from User where id = ? returning *
+                delete from User where id = ?
             "#;
 
-            // let users = r#"
-            //     select * from User
-            // "#;
+            let all_users = r#"
+                select * from User
+            "#;
         }
 
         let db = static_sqlite::open(":memory:").await?;
@@ -247,15 +255,16 @@ mod tests {
         assert_eq!(user.id, 1);
         assert_eq!(user.name, "swlkr");
 
+        let users = all_users(&db).await?;
+        assert_eq!(users.len(), 1);
+
         let user = update_user(&db, "swlkr2", 1).await?;
         assert_eq!(user.id, 1);
         assert_eq!(user.name, "swlkr2");
 
-        let _ = delete_user(&db, 1).await?;
-        // let users = users(&db).await?;
-
-//         assert_eq!(users.len(), 0);
-
+        delete_user(&db, 1).await?;
+        let users = all_users(&db).await?;
+        assert_eq!(users.len(), 0);
 
         Ok(())
     }

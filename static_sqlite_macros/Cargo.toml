@@ -11,6 +11,3 @@ proc-macro2 = "1"
 quote = "1"
 sqlparser = { version = "0.43" }
 syn = { version = "2", features = ["full", "extra-traits", "parsing"] }
-
-[features]
-tokio = []
