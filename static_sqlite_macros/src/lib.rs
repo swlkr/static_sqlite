@@ -86,9 +86,8 @@ fn sql_macro(exprs: Vec<SqlExpr>) -> Result<TokenStream> {
         .filter(|expr| !is_ddl(expr))
         .map(|expr| {
             let span = expr.ident.span();
-            let schema = query_schema(span, &db_schema, &expr.statements)?;
-            let _ = validate_query(&db_schema, &schema, span)?;
-            let fn_tokens = fn_tokens(expr, &db_schema, &schema)?;
+            let schema = query_schema(span, &expr.statements)?;
+            let fn_tokens = fn_tokens(span, expr, &db_schema, &schema)?;
             Ok(fn_tokens)
         })
         .collect::<Result<Vec<_>>>()?;
@@ -164,11 +163,15 @@ fn migrate_fn(expr: &SqlExpr) -> TokenStream {
 ///
 /// Makes sure all tables and columns in the query_schema
 /// exist in the db_schema
-fn validate_query(db_schema: &Schema<'_>, query_schema: &Schema<'_>, span: Span) -> Result<()> {
-    query_schema
+fn validate_query(
+    db_schema: &Schema<'_>,
+    query_schema: &Schema<'_>,
+    span: Span,
+) -> Option<TokenStream> {
+    let tokens = query_schema
         .0
         .iter()
-        .try_for_each(|(table, query_columns)| match db_schema.0.get(table) {
+        .filter_map(|(table, query_columns)| match db_schema.0.get(table) {
             Some(columns) => {
                 let extra_columns = query_columns
                     .iter()
@@ -182,33 +185,38 @@ fn validate_query(db_schema: &Schema<'_>, query_schema: &Schema<'_>, span: Span)
                     .collect::<Vec<_>>();
 
                 if !extra_columns.is_empty() {
-                    return Err(Error::new(
-                        span,
-                        format!(
-                            r#"Query contains columns that do not exist: {}"#,
-                            extra_columns
-                                .iter()
-                                .map(|col| col.name.to_string())
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        ),
-                    ));
+                    Some(
+                        Error::new(
+                            span,
+                            format!(
+                                r#"Query contains columns that do not exist: {}"#,
+                                extra_columns
+                                    .iter()
+                                    .map(|col| col.name.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            ),
+                        )
+                        .to_compile_error(),
+                    )
+                } else {
+                    None
                 }
-
-                Ok(())
             }
-            None => {
-                return Err(Error::new(
-                    span,
-                    format!("Table {} does not exist", table.0),
-                ))
-            }
-        })?;
+            None => Some(
+                Error::new(span, format!("Table {} does not exist", table.0)).to_compile_error(),
+            ),
+        })
+        .collect::<Vec<_>>();
 
-    Ok(())
+    match tokens.is_empty() {
+        true => None,
+        false => Some(quote! { #(#tokens)* }),
+    }
 }
 
 fn fn_tokens(
+    span: Span,
     SqlExpr {
         ident,
         sql,
@@ -217,6 +225,11 @@ fn fn_tokens(
     db_schema: &Schema<'_>,
     query_schema: &Schema<'_>,
 ) -> Result<TokenStream> {
+    let validated_tokens = validate_query(db_schema, query_schema, span);
+    match validated_tokens {
+        Some(tokens) => return Ok(tokens),
+        None => {}
+    };
     let span = ident.span();
     let placeholders = placeholders(db_schema, query_schema);
     let fn_args = fn_arg_tokens(span, &placeholders);

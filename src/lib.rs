@@ -245,7 +245,7 @@ mod tests {
             "#;
 
             let all_users = r#"
-                select * from User
+                select id, name from User
             "#;
         }
 
@@ -257,6 +257,9 @@ mod tests {
 
         let users = all_users(&db).await?;
         assert_eq!(users.len(), 1);
+        let user = users.first().unwrap();
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "swlkr");
 
         let user = update_user(&db, "swlkr2", 1).await?;
         assert_eq!(user.id, 1);

@@ -1,7 +1,7 @@
 use proc_macro2::Span;
 use sqlparser::ast::{
-    AlterTableOperation, ColumnDef, Expr, FunctionArg, FunctionArgExpr, ObjectName, ObjectType,
-    Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    AlterTableOperation, ColumnDef, Expr, FunctionArg, FunctionArgExpr, Ident, ObjectName,
+    ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 use std::collections::HashMap;
 use syn::{Error, Result};
@@ -118,16 +118,12 @@ pub fn db_schema<'a>(migrate_expr: &'a SqlExpr) -> Result<Schema<'a>> {
     Ok(Schema(set))
 }
 
-pub fn query_schema<'a>(
-    span: Span,
-    db_schema: &'a Schema,
-    statements: &'a Vec<Statement>,
-) -> Result<Schema<'a>> {
+pub fn query_schema<'a>(span: Span, statements: &'a Vec<Statement>) -> Result<Schema<'a>> {
     let mut set: HashMap<Table<'_>, Vec<Column<'_>>> = HashMap::new();
 
     statements.iter().try_for_each(|stmt| match stmt {
         Statement::Query(query) => {
-            set_query_columns(query, span, db_schema, &mut set)?;
+            set_query_columns(query, span, &mut set)?;
             Ok(())
         }
         Statement::Insert {
@@ -145,7 +141,7 @@ pub fn query_schema<'a>(
                     placeholder: Some("?"),
                 })
                 .collect();
-            let returning_columns = returning_columns(table, db_schema, returning);
+            let returning_columns = returning_columns(table, returning);
             columns.extend(returning_columns);
             set.insert(table, columns);
             Ok(())
@@ -187,9 +183,9 @@ pub fn query_schema<'a>(
                     }
                 })
                 .collect();
-            let selection_columns = selection_columns(table, db_schema, selection);
+            let selection_columns = selection_columns(table, selection);
             columns.extend(selection_columns);
-            let returning_columns = returning_columns(table, db_schema, returning);
+            let returning_columns = returning_columns(table, returning);
             columns.extend(returning_columns);
             set.insert(table, columns);
             Ok(())
@@ -212,8 +208,8 @@ pub fn query_schema<'a>(
                     _ => todo!(),
                 },
             };
-            let mut columns = selection_columns(table, db_schema, selection);
-            let ret_columns = returning_columns(table, db_schema, returning);
+            let mut columns = selection_columns(table, selection);
+            let ret_columns = returning_columns(table, returning);
             columns.extend(ret_columns);
             set.insert(table, columns);
             Ok(())
@@ -227,7 +223,6 @@ pub fn query_schema<'a>(
 fn set_query_columns<'a>(
     query: &'a Query,
     span: Span,
-    db_schema: &'a Schema<'_>,
     set: &mut HashMap<Table<'a>, Vec<Column<'a>>>,
 ) -> Result<()> {
     let Query {
@@ -243,15 +238,17 @@ fn set_query_columns<'a>(
                 Some(table) => *table,
                 None => return Err(Error::new(span, "Only one table in from supported for now")),
             };
-            let mut columns = selection_columns(table, db_schema, &select.selection);
+            let mut columns = selection_columns(table, &select.selection);
+            let projection_columns = select_items_columns(table, select.projection.as_slice());
+            columns.extend(projection_columns);
             let order_by_columns: Vec<Column<'_>> = order_by
                 .iter()
-                .flat_map(|ob| expr_columns(table, db_schema, &ob.expr))
+                .flat_map(|ob| expr_columns(table, &ob.expr))
                 .collect();
             columns.extend(order_by_columns);
             set.insert(table, columns.into_iter().collect());
         }
-        SetExpr::Query(query) => set_query_columns(query, span, db_schema, set)?,
+        SetExpr::Query(query) => set_query_columns(query, span, set)?,
         _ => todo!("fn set_query_columns"),
     }
     Ok(())
@@ -284,64 +281,67 @@ fn relation_table(relation: &TableFactor) -> Table<'_> {
 
 fn returning_columns<'a>(
     table: Table<'a>,
-    db_schema: &'a Schema<'a>,
     returning: &'a Option<Vec<SelectItem>>,
 ) -> Vec<Column<'a>> {
     match returning {
-        Some(select_items) => select_items_columns(table, db_schema, select_items),
+        Some(select_items) => select_items_columns(table, select_items),
         None => vec![],
     }
 }
 
-fn select_items_columns<'a>(
-    _table: Table<'a>,
-    _db_schema: &'a Schema<'a>,
-    select_items: &'a [SelectItem],
-) -> Vec<Column<'a>> {
+fn select_items_columns<'a>(_table: Table<'a>, select_items: &'a [SelectItem]) -> Vec<Column<'a>> {
     select_items
         .iter()
-        .flat_map(|si| match si {
+        .filter_map(|si| match si {
             SelectItem::UnnamedExpr(expr) => match expr {
-                Expr::Identifier(name) => vec![Column {
+                Expr::Identifier(name) => Some(Column {
                     name,
                     def: None,
                     placeholder: None,
-                }],
-                _ => todo!("fn schema returning insert statement UnnamedExpr"),
+                }),
+                Expr::CompoundIdentifier(name) => compound_ident_column(name),
+                _ => todo!("fn select_items_columns selectitem match"),
             },
             SelectItem::ExprWithAlias { expr, .. } => match expr {
-                Expr::Identifier(name) => vec![Column {
+                Expr::Identifier(name) => Some(Column {
                     name,
                     def: None,
                     placeholder: None,
-                }],
-                _ => todo!("fn schema returning insert statement ExprWithAlias"),
+                }),
+                Expr::CompoundIdentifier(name) => compound_ident_column(name),
+                expr => todo!("fn select_items_columns ExprWithAlias {expr}"),
             },
-            // SelectItem::QualifiedWildcard(name, _) => match db_schema.0.get(&Table(name)) {
-            //     Some(columns) => columns.into_iter().map(|col| *col).collect(),
-            //     None => vec![],
-            // },
-            // SelectItem::Wildcard(_) => match db_schema.0.get(&table) {
-            //     Some(columns) => columns.into_iter().map(|col| *col).collect(),
-            //     None => vec![],
-            // },
-            _ => vec![],
+            _ => None,
         })
         .collect()
 }
 
-fn selection_columns<'a>(
-    table: Table<'a>,
-    db_schema: &'a Schema<'a>,
-    selection: &'a Option<Expr>,
-) -> Vec<Column<'a>> {
+fn compound_ident_column<'a>(name: &'a Vec<Ident>) -> Option<Column<'a>> {
+    let name = match name.as_slice() {
+        [_schema, _table, name] => Some(name),
+        [_table, name] => Some(name),
+        [name] => Some(name),
+        _ => None,
+    };
+
+    match name {
+        Some(name) => Some(Column {
+            name,
+            def: None,
+            placeholder: None,
+        }),
+        None => None,
+    }
+}
+
+fn selection_columns<'a>(table: Table<'a>, selection: &'a Option<Expr>) -> Vec<Column<'a>> {
     match selection {
-        Some(expr) => expr_columns(table, db_schema, expr),
+        Some(expr) => expr_columns(table, expr),
         None => vec![],
     }
 }
 
-fn expr_columns<'a>(table: Table<'a>, db_schema: &Schema<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
+fn expr_columns<'a>(table: Table<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
     match expr {
         Expr::BinaryOp { left, op: _, right } => match (left.as_ref(), right.as_ref()) {
             (Expr::Identifier(name), Expr::Value(Value::Placeholder(val))) if val == "?" => {
@@ -373,29 +373,46 @@ fn expr_columns<'a>(table: Table<'a>, db_schema: &Schema<'a>, expr: &'a Expr) ->
                 }
             }
             (Expr::BinaryOp { left, right, .. }, _) => {
-                let mut cols = expr_columns(table, db_schema, left);
-                cols.extend(expr_columns(table, db_schema, right));
+                let mut cols = expr_columns(table, left);
+                cols.extend(expr_columns(table, right));
                 cols
             }
             _ => todo!("fn expr_columns: rest of the binary ops"),
         },
+        Expr::CompoundIdentifier(parts) => {
+            let name = match parts.as_slice() {
+                [_schema, _table, name] => Some(name),
+                [_table, name] => Some(name),
+                [name] => Some(name),
+                _ => None,
+            };
+
+            match name {
+                Some(name) => vec![Column {
+                    name,
+                    def: None,
+                    placeholder: None,
+                }],
+                None => vec![],
+            }
+        }
         Expr::Identifier(name) => vec![Column {
             name,
             def: None,
             placeholder: None,
         }],
-        Expr::Nested(expr) => expr_columns(table, db_schema, expr),
+        Expr::Nested(expr) => expr_columns(table, expr),
         Expr::Function(func) => func
             .args
             .iter()
             .flat_map(|arg| match arg {
                 FunctionArg::Named { name: _name, arg } => match arg {
-                    FunctionArgExpr::Expr(expr) => expr_columns(table, db_schema, expr),
+                    FunctionArgExpr::Expr(expr) => expr_columns(table, expr),
                     FunctionArgExpr::QualifiedWildcard(_object_name) => todo!(),
                     FunctionArgExpr::Wildcard => todo!(),
                 },
                 FunctionArg::Unnamed(function_arg_expr) => match function_arg_expr {
-                    FunctionArgExpr::Expr(expr) => expr_columns(table, db_schema, expr),
+                    FunctionArgExpr::Expr(expr) => expr_columns(table, expr),
                     FunctionArgExpr::QualifiedWildcard(_object_name) => todo!(),
                     FunctionArgExpr::Wildcard => todo!(),
                 },
@@ -409,14 +426,12 @@ fn expr_columns<'a>(table: Table<'a>, db_schema: &Schema<'a>, expr: &'a Expr) ->
         } => {
             let mut cols = conditions
                 .iter()
-                .flat_map(|expr| expr_columns(table, db_schema, expr))
+                .flat_map(|expr| expr_columns(table, expr))
                 .collect::<Vec<_>>();
-            let results = results
-                .iter()
-                .flat_map(|expr| expr_columns(table, db_schema, expr));
+            let results = results.iter().flat_map(|expr| expr_columns(table, expr));
             cols.extend(results);
             if let Some(else_expr) = else_result {
-                let columns = expr_columns(table, db_schema, else_expr.as_ref());
+                let columns = expr_columns(table, else_expr.as_ref());
                 cols.extend(columns);
             }
             cols
