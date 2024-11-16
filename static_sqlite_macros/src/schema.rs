@@ -112,7 +112,7 @@ pub fn db_schema<'a>(migrate_expr: &'a SqlExpr) -> Result<Schema<'a>> {
             }
             Ok(())
         }
-        _ => todo!(),
+        _ => Ok(()),
     })?;
 
     Ok(Schema(set))
@@ -183,7 +183,7 @@ pub fn query_schema<'a>(span: Span, statements: &'a Vec<Statement>) -> Result<Sc
                     }
                 })
                 .collect();
-            let selection_columns = selection_columns(table, selection);
+            let selection_columns = selection_columns(selection);
             columns.extend(selection_columns);
             let returning_columns = returning_columns(table, returning);
             columns.extend(returning_columns);
@@ -208,7 +208,7 @@ pub fn query_schema<'a>(span: Span, statements: &'a Vec<Statement>) -> Result<Sc
                     _ => todo!(),
                 },
             };
-            let mut columns = selection_columns(table, selection);
+            let mut columns = selection_columns(selection);
             let ret_columns = returning_columns(table, returning);
             columns.extend(ret_columns);
             set.insert(table, columns);
@@ -238,12 +238,12 @@ fn set_query_columns<'a>(
                 Some(table) => *table,
                 None => return Err(Error::new(span, "Only one table in from supported for now")),
             };
-            let mut columns = selection_columns(table, &select.selection);
+            let mut columns = selection_columns(&select.selection);
             let projection_columns = select_items_columns(table, select.projection.as_slice());
             columns.extend(projection_columns);
             let order_by_columns: Vec<Column<'_>> = order_by
                 .iter()
-                .flat_map(|ob| expr_columns(table, &ob.expr))
+                .flat_map(|ob| expr_columns(&ob.expr))
                 .collect();
             columns.extend(order_by_columns);
             set.insert(table, columns.into_iter().collect());
@@ -334,14 +334,14 @@ fn compound_ident_column<'a>(name: &'a Vec<Ident>) -> Option<Column<'a>> {
     }
 }
 
-fn selection_columns<'a>(table: Table<'a>, selection: &'a Option<Expr>) -> Vec<Column<'a>> {
+fn selection_columns<'a>(selection: &'a Option<Expr>) -> Vec<Column<'a>> {
     match selection {
-        Some(expr) => expr_columns(table, expr),
+        Some(expr) => expr_columns(expr),
         None => vec![],
     }
 }
 
-fn expr_columns<'a>(table: Table<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
+fn expr_columns<'a>(expr: &'a Expr) -> Vec<Column<'a>> {
     match expr {
         Expr::BinaryOp { left, op: _, right } => match (left.as_ref(), right.as_ref()) {
             (Expr::Identifier(name), Expr::Value(Value::Placeholder(val))) if val == "?" => {
@@ -373,8 +373,8 @@ fn expr_columns<'a>(table: Table<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
                 }
             }
             (Expr::BinaryOp { left, right, .. }, _) => {
-                let mut cols = expr_columns(table, left);
-                cols.extend(expr_columns(table, right));
+                let mut cols = expr_columns(left);
+                cols.extend(expr_columns(right));
                 cols
             }
             _ => todo!("fn expr_columns: rest of the binary ops"),
@@ -401,18 +401,18 @@ fn expr_columns<'a>(table: Table<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
             def: None,
             placeholder: None,
         }],
-        Expr::Nested(expr) => expr_columns(table, expr),
+        Expr::Nested(expr) => expr_columns(expr),
         Expr::Function(func) => func
             .args
             .iter()
             .flat_map(|arg| match arg {
                 FunctionArg::Named { name: _name, arg } => match arg {
-                    FunctionArgExpr::Expr(expr) => expr_columns(table, expr),
+                    FunctionArgExpr::Expr(expr) => expr_columns(expr),
                     FunctionArgExpr::QualifiedWildcard(_object_name) => todo!(),
                     FunctionArgExpr::Wildcard => todo!(),
                 },
                 FunctionArg::Unnamed(function_arg_expr) => match function_arg_expr {
-                    FunctionArgExpr::Expr(expr) => expr_columns(table, expr),
+                    FunctionArgExpr::Expr(expr) => expr_columns(expr),
                     FunctionArgExpr::QualifiedWildcard(_object_name) => todo!(),
                     FunctionArgExpr::Wildcard => todo!(),
                 },
@@ -426,12 +426,12 @@ fn expr_columns<'a>(table: Table<'a>, expr: &'a Expr) -> Vec<Column<'a>> {
         } => {
             let mut cols = conditions
                 .iter()
-                .flat_map(|expr| expr_columns(table, expr))
+                .flat_map(|expr| expr_columns(expr))
                 .collect::<Vec<_>>();
-            let results = results.iter().flat_map(|expr| expr_columns(table, expr));
+            let results = results.iter().flat_map(|expr| expr_columns(expr));
             cols.extend(results);
             if let Some(else_expr) = else_result {
-                let columns = expr_columns(table, else_expr.as_ref());
+                let columns = expr_columns(else_expr.as_ref());
                 cols.extend(columns);
             }
             cols
@@ -452,5 +452,41 @@ pub fn query_table_names(query: &Box<Query>) -> Vec<&ObjectName> {
             .collect::<Vec<_>>(),
         SetExpr::Query(query) => query_table_names(query),
         _ => todo!("query_table_names"),
+    }
+}
+
+pub fn placeholder_len(stmt: &Statement) -> usize {
+    match stmt {
+        Statement::Insert { source, .. } => match source {
+            Some(query) => {
+                let Query { body, .. } = query.as_ref();
+                match body.as_ref() {
+                    SetExpr::Values(values) => values
+                        .rows
+                        .iter()
+                        .flat_map(|expr| expr)
+                        .collect::<Vec<_>>()
+                        .len(),
+                    _ => todo!("fn placeholders"),
+                }
+            }
+            None => 0,
+        },
+        Statement::Update {
+            assignments,
+            selection,
+            ..
+        } => {
+            let len = assignments.len();
+            match selection {
+                Some(expr) => expr_columns(expr).len() + len,
+                None => len,
+            }
+        }
+        Statement::Delete { selection, .. } => match selection {
+            Some(expr) => expr_columns(expr).len(),
+            None => todo!(),
+        },
+        _ => 0,
     }
 }

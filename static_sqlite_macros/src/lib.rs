@@ -6,7 +6,7 @@ use syn::{parse_macro_input, Error, LocalInit, PatIdent, Result};
 
 mod schema;
 
-use schema::{db_schema, query_schema, query_table_names, Column, Schema, Table};
+use schema::{db_schema, placeholder_len, query_schema, query_table_names, Column, Schema, Table};
 
 /// Make rust structs and functions from sql
 ///
@@ -189,7 +189,7 @@ fn validate_query(
                         Error::new(
                             span,
                             format!(
-                                r#"Query contains columns that do not exist: {}"#,
+                                r#"Column {} doesn't exist"#,
                                 extra_columns
                                     .iter()
                                     .map(|col| col.name.to_string())
@@ -204,7 +204,7 @@ fn validate_query(
                 }
             }
             None => Some(
-                Error::new(span, format!("Table {} does not exist", table.0)).to_compile_error(),
+                Error::new(span, format!("Table {} doesn't exist", table.0)).to_compile_error(),
             ),
         })
         .collect::<Vec<_>>();
@@ -231,12 +231,17 @@ fn fn_tokens(
         None => {}
     };
     let span = ident.span();
-    let placeholders = placeholders(db_schema, query_schema);
-    let fn_args = fn_arg_tokens(span, &placeholders);
-    let params = param_tokens(span, &placeholders);
     let statement = statements
         .last()
         .ok_or(Error::new(span, "Need at least one sql statement"))?;
+    let placeholder_len = placeholder_len(&statement);
+    let placeholder_cols = placeholder_columns(db_schema, query_schema);
+    match validate_placeholders(span, &placeholder_cols, placeholder_len) {
+        Some(tokens) => return Ok(tokens),
+        None => {}
+    };
+    let fn_args = fn_arg_tokens(span, &placeholder_cols);
+    let params = param_tokens(span, &placeholder_cols);
     let (return_stmt, return_ty) = return_tokens(statement);
     let generic = generic_token(statement);
 
@@ -251,11 +256,44 @@ fn fn_tokens(
     })
 }
 
+fn validate_placeholders(
+    span: Span,
+    placeholder_cols: &[&Column<'_>],
+    placeholder_len: usize,
+) -> Option<TokenStream> {
+    if placeholder_cols.len() != placeholder_len {
+        return Some(
+            Error::new(
+                span,
+                format!(
+                    "{} {} != {} {}",
+                    placeholder_len,
+                    match placeholder_len {
+                        1 => "placeholder",
+                        _ => "placeholders",
+                    },
+                    placeholder_cols.len(),
+                    match placeholder_cols.len() {
+                        1 => "column",
+                        _ => "columns",
+                    },
+                ),
+            )
+            .to_compile_error(),
+        );
+    } else {
+        None
+    }
+}
+
 fn generic_token(stmt: &Statement) -> TokenStream {
     statement_table(stmt)
 }
 
-fn placeholders<'a>(db_schema: &'a Schema<'_>, schema: &'a Schema<'_>) -> Vec<&'a Column<'a>> {
+fn placeholder_columns<'a>(
+    db_schema: &'a Schema<'_>,
+    schema: &'a Schema<'_>,
+) -> Vec<&'a Column<'a>> {
     schema
         .0
         .iter()
