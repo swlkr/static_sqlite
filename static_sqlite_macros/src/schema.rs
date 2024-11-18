@@ -1,7 +1,7 @@
 use proc_macro2::Span;
 use sqlparser::ast::{
     AlterTableOperation, ColumnDef, Expr, FunctionArg, FunctionArgExpr, Ident, ObjectName,
-    ObjectType, Query, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    ObjectType, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 use std::collections::HashMap;
 use syn::{Error, Result};
@@ -467,6 +467,17 @@ pub fn placeholder_len(stmt: &Statement) -> usize {
                         .flat_map(|expr| expr)
                         .collect::<Vec<_>>()
                         .len(),
+                    SetExpr::Select(select) => {
+                        let Select { selection, .. } = select.as_ref();
+                        match selection.as_ref() {
+                            Some(expr) => expr_columns(expr)
+                                .iter()
+                                .filter(|col| col.placeholder.is_some())
+                                .collect::<Vec<_>>()
+                                .len(),
+                            None => 0,
+                        }
+                    }
                     _ => todo!("fn placeholders"),
                 }
             }
@@ -487,6 +498,30 @@ pub fn placeholder_len(stmt: &Statement) -> usize {
             Some(expr) => expr_columns(expr).len(),
             None => todo!(),
         },
+        Statement::Query(query) => {
+            let Query { body, .. } = query.as_ref();
+            match body.as_ref() {
+                SetExpr::Values(values) => values
+                    .rows
+                    .iter()
+                    .flat_map(|expr| expr)
+                    .collect::<Vec<_>>()
+                    .len(),
+                SetExpr::Select(select) => {
+                    let Select { selection, .. } = select.as_ref();
+                    dbg!(&selection);
+                    match selection.as_ref() {
+                        Some(expr) => expr_columns(expr)
+                            .iter()
+                            .filter(|col| col.placeholder.is_some())
+                            .collect::<Vec<_>>()
+                            .len(),
+                        None => 0,
+                    }
+                }
+                _ => todo!("fn placeholders"),
+            }
+        }
         _ => 0,
     }
 }
