@@ -509,7 +509,6 @@ pub fn placeholder_len(stmt: &Statement) -> usize {
                     .len(),
                 SetExpr::Select(select) => {
                     let Select { selection, .. } = select.as_ref();
-                    dbg!(&selection);
                     match selection.as_ref() {
                         Some(expr) => expr_columns(expr)
                             .iter()
