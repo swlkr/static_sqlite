@@ -83,7 +83,6 @@ fn sql_macro(exprs: Vec<SqlExpr>) -> Result<TokenStream> {
 
     let fns = exprs
         .iter()
-        .filter(|expr| !is_ddl(expr))
         .map(|expr| {
             let span = expr.ident.span();
             let schema = query_schema(span, &expr.statements)?;
@@ -217,14 +216,15 @@ fn validate_query(
 
 fn fn_tokens(
     span: Span,
-    SqlExpr {
-        ident,
-        sql,
-        statements,
-    }: &SqlExpr,
+    expr: &SqlExpr,
     db_schema: &Schema<'_>,
     query_schema: &Schema<'_>,
 ) -> Result<TokenStream> {
+    let SqlExpr {
+        ident,
+        sql,
+        statements,
+    } = expr;
     let validated_tokens = validate_query(db_schema, query_schema, span);
     match validated_tokens {
         Some(tokens) => return Ok(tokens),
@@ -240,20 +240,24 @@ fn fn_tokens(
         Some(tokens) => return Ok(tokens),
         None => {}
     };
-    let fn_args = fn_arg_tokens(span, &placeholder_cols);
-    let params = param_tokens(span, &placeholder_cols);
-    let (return_stmt, return_ty) = return_tokens(statement);
-    let generic = generic_token(statement);
+    if !is_ddl(expr) {
+        let fn_args = fn_arg_tokens(span, &placeholder_cols);
+        let params = param_tokens(span, &placeholder_cols);
+        let (return_stmt, return_ty) = return_tokens(statement);
+        let generic = generic_token(statement);
 
-    Ok(quote! {
-        #[doc = #sql]
-        pub async fn #ident(sqlite: &static_sqlite::Sqlite, #(#fn_args),*) -> static_sqlite::Result<#return_ty> {
-            let sql = #sql.to_string();
-            let rows: Vec<#generic> = sqlite.call(move |conn| conn.query(#sql, #params)).await?;
+        Ok(quote! {
+            #[doc = #sql]
+            pub async fn #ident(sqlite: &static_sqlite::Sqlite, #(#fn_args),*) -> static_sqlite::Result<#return_ty> {
+                let sql = #sql.to_string();
+                let rows: Vec<#generic> = sqlite.call(move |conn| conn.query(#sql, #params)).await?;
 
-            #return_stmt
-        }
-    })
+                #return_stmt
+            }
+        })
+    } else {
+        Ok(quote! {})
+    }
 }
 
 fn validate_placeholders(
@@ -356,9 +360,10 @@ fn struct_tokens(schema: &Schema<'_>, expr: &SqlExpr) -> Result<Vec<TokenStream>
     let span = expr.ident.span();
 
     schema.0.iter().map(|(table, columns)| {
+        let column_defs = columns.iter().filter_map(|col| col.def).collect::<Vec<_>>();
         let ident = struct_ident(span, table);
-        let fields = struct_fields(span, columns);
-        let match_stmt = match_tokens(span, columns);
+        let fields = struct_fields(span, &column_defs);
+        let match_stmt = match_tokens(span, &column_defs);
 
         Ok(match ident {
             Some(ident) => quote! {
@@ -398,29 +403,23 @@ fn struct_ident(span: Span, Table(ObjectName(parts)): &Table<'_>) -> Option<Iden
     }
 }
 
-fn struct_fields(span: Span, columns: &Vec<Column<'_>>) -> Vec<TokenStream> {
+fn struct_fields(span: Span, columns: &Vec<&ColumnDef>) -> Vec<TokenStream> {
     columns
         .iter()
-        .map(|col| {
-            let not_null = match &col.def {
-                Some(def) => def.options.iter().any(|opt| match &opt.option {
-                    sqlparser::ast::ColumnOption::NotNull => true,
-                    sqlparser::ast::ColumnOption::Unique { is_primary, .. } => *is_primary,
-                    _ => false,
-                }),
-                None => false,
+        .map(|def| {
+            let not_null = def.options.iter().any(|opt| match &opt.option {
+                sqlparser::ast::ColumnOption::NotNull => true,
+                sqlparser::ast::ColumnOption::Unique { is_primary, .. } => *is_primary,
+                _ => false,
+            });
+            let field_type = match def.data_type {
+                DataType::Blob(_) => quote! { Vec<u8> },
+                DataType::Integer(_) => quote! { i64 },
+                DataType::Real | DataType::Double => quote! { f64 },
+                DataType::Text => quote! { String },
+                _ => todo!("struct_fields insert statement data_type"),
             };
-            let field_type = match &col.def {
-                Some(ColumnDef { data_type, .. }) => match data_type {
-                    DataType::Blob(_) => quote! { Vec<u8> },
-                    DataType::Integer(_) => quote! { i64 },
-                    DataType::Real | DataType::Double => quote! { f64 },
-                    DataType::Text => quote! { String },
-                    _ => todo!("struct_fields insert statement data_type"),
-                },
-                None => todo!("struct_fields what"),
-            };
-            let name = Ident::new(&col.name.to_string(), span);
+            let name = Ident::new(&def.name.to_string(), span);
 
             match not_null {
                 true => quote! { #name: #field_type },
@@ -430,15 +429,10 @@ fn struct_fields(span: Span, columns: &Vec<Column<'_>>) -> Vec<TokenStream> {
         .collect()
 }
 
-fn match_tokens(span: Span, columns: &Vec<Column<'_>>) -> Vec<TokenStream> {
+fn match_tokens(span: Span, columns: &Vec<&ColumnDef>) -> Vec<TokenStream> {
     columns
         .iter()
-        .map(|col| {
-            let def = match &col.def {
-                Some(def) => def,
-                None => todo!("match_tokens column without a definition"),
-            };
-
+        .map(|def| {
             let lit_str = &def.name.to_string();
             let ident = Ident::new(lit_str, span);
 

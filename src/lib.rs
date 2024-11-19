@@ -271,4 +271,25 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn alter_table_ref_checks_tables() -> Result<()> {
+        sql! {
+            let migrate = r#"
+                create table User (
+                    id integer primary key,
+                    email text unique not null
+                );
+
+                create table Todo (
+                    id integer primary key,
+                    user_id integer not null references User(id)
+                );
+            "#;
+        }
+        let db = static_sqlite::open(":memory:").await?;
+        migrate(&db).await?;
+
+        Ok(())
+    }
 }

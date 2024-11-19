@@ -1,7 +1,8 @@
 use proc_macro2::Span;
 use sqlparser::ast::{
-    AlterTableOperation, ColumnDef, Expr, FunctionArg, FunctionArgExpr, Ident, ObjectName,
-    ObjectType, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    AlterTableOperation, ColumnDef, ColumnOption, Expr, FunctionArg, FunctionArgExpr, Ident,
+    ObjectName, ObjectType, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    TableWithJoins, Value,
 };
 use std::collections::HashMap;
 use syn::{Error, Result};
@@ -214,7 +215,45 @@ pub fn query_schema<'a>(span: Span, statements: &'a Vec<Statement>) -> Result<Sc
             set.insert(table, columns);
             Ok(())
         }
-        _ => todo!(),
+        Statement::CreateTable { name, columns, .. } => {
+            for column in columns {
+                let ColumnDef { options, .. } = column;
+                options.iter().for_each(|opt| match &opt.option {
+                    ColumnOption::ForeignKey {
+                        foreign_table,
+                        referred_columns,
+                        ..
+                    } => {
+                        set.insert(
+                            Table(foreign_table),
+                            referred_columns
+                                .iter()
+                                .map(|name| Column {
+                                    name,
+                                    def: None,
+                                    placeholder: None,
+                                })
+                                .collect(),
+                        );
+                    }
+                    _ => {}
+                });
+            }
+            set.insert(
+                Table(name),
+                columns
+                    .iter()
+                    .map(|col| Column {
+                        name: &col.name,
+                        def: Some(&col),
+                        placeholder: None,
+                    })
+                    .collect(),
+            );
+            Ok(())
+        }
+        Statement::AlterTable { .. } => Ok(()),
+        _ => todo!("fn query_schema Statement match statement"),
     })?;
 
     Ok(Schema(set))
