@@ -411,12 +411,11 @@ fn expr_columns<'a>(expr: &'a Expr) -> Vec<Column<'a>> {
                     _ => unreachable!("one part compound identifier?!"),
                 }
             }
-            (Expr::BinaryOp { left, right, .. }, _) => {
-                let mut cols = expr_columns(left);
-                cols.extend(expr_columns(right));
-                cols
+            (left, right) => {
+                let mut columns = expr_columns(left);
+                columns.extend(expr_columns(right));
+                columns
             }
-            _ => todo!("fn expr_columns: rest of the binary ops"),
         },
         Expr::CompoundIdentifier(parts) => {
             let name = match parts.as_slice() {
@@ -475,7 +474,7 @@ fn expr_columns<'a>(expr: &'a Expr) -> Vec<Column<'a>> {
             }
             cols
         }
-        _ => todo!("expr_columns rest of the ops"),
+        expr => todo!("expr_columns rest of the ops {expr}"),
     }
 }
 
