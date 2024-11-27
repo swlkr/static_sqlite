@@ -11,3 +11,7 @@ crossbeam-channel = { version = "0.5" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
+
+[[test]]
+name = "integration_test"
+test = true
