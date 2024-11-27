@@ -473,7 +473,8 @@ fn expr_columns<'a>(expr: &'a Expr) -> Vec<Column<'a>> {
                 cols.extend(columns);
             }
             cols
-        }
+        },
+        Expr::UnaryOp { expr, .. } => expr_columns(expr),
         expr => todo!("expr_columns rest of the ops {expr}"),
     }
 }
