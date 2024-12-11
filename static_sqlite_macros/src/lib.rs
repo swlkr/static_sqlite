@@ -422,8 +422,8 @@ fn struct_fields(span: Span, columns: &Vec<&ColumnDef>) -> Vec<TokenStream> {
             let name = Ident::new(&def.name.to_string(), span);
 
             match not_null {
-                true => quote! { #name: #field_type },
-                false => quote! { #name: Option<#field_type> },
+                true => quote! { pub #name: #field_type },
+                false => quote! { pub #name: Option<#field_type> },
             }
         })
         .collect()
