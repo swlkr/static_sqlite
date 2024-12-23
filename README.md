@@ -23,7 +23,7 @@ sql! {
 
     let insert_user = r#"
         insert into User (name)
-        values (?)
+        values (:name)
         returning *
     "#;
 }
