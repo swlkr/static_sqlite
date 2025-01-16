@@ -1,18 +1,17 @@
 // Inspired by the incredible tokio-rusqlite crate
 // https://github.com/programatik29/tokio-rusqlite/blob/master/src/lib.rs
 
+use static_sqlite_core as core;
 use crossbeam_channel::Sender;
 use tokio::sync::oneshot;
 
-pub use crate::{FromRow, Value};
+pub use static_sqlite_core::*;
 
-type Result<T> = std::result::Result<T, crate::Error>;
-
-type CallFn = Box<dyn FnOnce(&mut crate::ffi::Sqlite) + Send + 'static>;
+type CallFn = Box<dyn FnOnce(&mut core::Sqlite) + Send + 'static>;
 
 enum Message {
     Execute(CallFn),
-    Close(oneshot::Sender<std::result::Result<(), crate::Error>>),
+    Close(oneshot::Sender<std::result::Result<(), Error>>),
 }
 
 #[derive(Clone)]
@@ -22,7 +21,7 @@ pub struct Sqlite {
 
 impl Sqlite {
     pub async fn close(self) -> Result<()> {
-        let (sender, receiver) = oneshot::channel::<std::result::Result<(), crate::Error>>();
+        let (sender, receiver) = oneshot::channel::<std::result::Result<(), Error>>();
 
         if let Err(crossbeam_channel::SendError(_)) = self.sender.send(Message::Close(sender)) {
             return Ok(());
@@ -36,12 +35,12 @@ impl Sqlite {
 
         result
             .unwrap()
-            .map_err(|e| crate::Error::Sqlite(e.to_string()))
+            .map_err(|e| Error::Sqlite(e.to_string()))
     }
 
     pub async fn call<F, R>(&self, function: F) -> Result<R>
     where
-        F: FnOnce(&crate::ffi::Sqlite) -> Result<R> + 'static + Send,
+        F: FnOnce(&core::Sqlite) -> Result<R> + 'static + Send,
         R: Send + 'static,
     {
         let (sender, receiver) = oneshot::channel::<Result<R>>();
@@ -51,20 +50,20 @@ impl Sqlite {
                 let value = function(conn);
                 let _ = sender.send(value);
             })))
-            .map_err(|_| crate::Error::ConnectionClosed)?;
+            .map_err(|_| Error::ConnectionClosed)?;
 
-        receiver.await.map_err(|_| crate::Error::ConnectionClosed)?
+        receiver.await.map_err(|_| Error::ConnectionClosed)?
     }
 }
 
 pub async fn open(path: impl ToString) -> Result<Sqlite> {
     let path = path.to_string();
-    start(move || crate::ffi::Sqlite::open(&path)).await
+    start(move || core::Sqlite::open(&path)).await
 }
 
 async fn start<F>(open: F) -> Result<Sqlite>
 where
-    F: FnOnce() -> Result<crate::ffi::Sqlite> + Send + 'static,
+    F: FnOnce() -> Result<core::Sqlite> + Send + 'static,
 {
     let (sender, receiver) = crossbeam_channel::unbounded::<Message>();
     let (result_sender, result_receiver) = oneshot::channel();
@@ -122,9 +121,9 @@ pub async fn execute_all(conn: &Sqlite, sql: &'static str) -> Result<()> {
 pub async fn query<T: FromRow + Send + 'static>(
     conn: &Sqlite,
     sql: &'static str,
-    params: &'static [Value],
+    params: Vec<Value>,
 ) -> Result<Vec<T>> {
-    conn.call(|conn| conn.query(sql, params)).await
+    conn.call(move |conn| conn.query(sql, &params)).await
 }
 
 pub async fn rows(

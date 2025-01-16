@@ -1,0 +1,9 @@
+[package]
+name = "static_sqlite_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "1"
+static_sqlite_ffi = { path = "../static_sqlite_ffi" }
+

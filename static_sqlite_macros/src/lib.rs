@@ -1,12 +1,16 @@
+use std::collections::HashMap;
+use std::ops::ControlFlow;
+
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
-use sqlparser::ast::{ColumnDef, DataType, ObjectName, SelectItem, TableFactor, TableWithJoins};
+use sqlparser::ast::{visit_relations, Delete, Insert, TableFactor, TableWithJoins};
 use sqlparser::{ast::Statement, dialect::SQLiteDialect, parser::Parser};
-use syn::{parse_macro_input, Error, LocalInit, PatIdent, Result};
+use syn::{parse_macro_input, Error, LitStr, LocalInit, PatIdent, Result};
 
-mod schema;
+mod errors;
+mod names;
 
-use schema::{db_schema, placeholder_len, query_schema, query_table_names, Column, Schema, Table};
+use static_sqlite_core::{self as sqlite, Sqlite};
 
 /// Make rust structs and functions from sql
 ///
@@ -71,63 +75,175 @@ pub fn sql(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     }
 }
 
-// Use those table, column names/types for static typing as well
-// as fn generation and struct generation
-fn sql_macro(exprs: Vec<SqlExpr>) -> Result<TokenStream> {
-    // we need to find the one expr that has all ddl statements
-    // treat this as the migrate fn
-    // this also grabs the db schema
-    let (db_schema, migrate_fn, migrate_expr) = migrate_expr(&exprs)?;
-
-    let structs = struct_tokens(&db_schema, migrate_expr)?;
-
-    let fns = exprs
-        .iter()
-        .map(|expr| {
-            let span = expr.ident.span();
-            let schema = query_schema(span, &expr.statements)?;
-            let fn_tokens = fn_tokens(span, expr, &db_schema, &schema)?;
-            Ok(fn_tokens)
-        })
-        .collect::<Result<Vec<_>>>()?;
-
+// There are four things we want to do
+// 1. Parse the sql, return any parsing errors (this happens when parsing the input impl syn::parse::Parse for SqlExprs)
+// 2. Run the sql against an in memory sqlite db, looking for any sqlite errors
+// 3. Generate the structs from the migrate expr (the one with only ddl sql statements)
+// 4. Generate the fns from the other idents in the sql! macro
+fn sql_macro(exprs: Vec<SqlExpr>) -> syn::Result<TokenStream> {
+    let (migrate_expr, exprs) = split_exprs(&exprs)?;
+    let db = match sqlite::open(":memory:") {
+        Ok(db) => db,
+        Err(err) => return Err(syn::Error::new(Span::call_site(), err)),
+    };
+    if let Err(err) = db.execute_all("PRAGMA foreign_keys = ON;") {
+        return Err(syn::Error::new(Span::call_site(), err));
+    };
+    // validate migrate expr
+    for stmt in &migrate_expr.statements {
+        if let Err(err) = db.execute_all(&stmt.to_string()) {
+            return Err(syn::Error::new(migrate_expr.ident.span(), err));
+        }
+    }
+    let _ = names::validate_migrate_expr(&migrate_expr)?;
+    let migrate_fn = migrate_fn(&migrate_expr);
+    let schema = schema(&db);
+    let structs = structs_tokens(migrate_expr.ident.span(), &schema);
+    let fns = fn_tokens(&db, &schema, &exprs)?;
     let output = quote! {
         #(#structs)*
-
         #(#fns)*
-
         #migrate_fn
     };
 
     Ok(output)
 }
 
-// This wraps the two fns that have to deal with the database schema
+fn input_column_names(db: &Sqlite, expr: &SqlExpr) -> syn::Result<Vec<String>> {
+    let mut output = vec![];
+    match db.bind_param_names(&expr.sql) {
+        Ok(names) => output.extend(names),
+        Err(err) => return Err(syn::Error::new(expr.ident.span(), err.to_string())),
+    }
+    Ok(output)
+}
 
-// db_schema goes through the migrate expr statements and comes up with
-// a set of tables and columns to compares each query against for type checking
+fn output_column_names(db: &Sqlite, expr: &SqlExpr) -> syn::Result<Vec<String>> {
+    let mut output = vec![];
+    match db.aliased_column_names(&expr.sql) {
+        Ok(names) => output.extend(names),
+        Err(err) => return Err(syn::Error::new(expr.ident.span(), err.to_string())),
+    }
+    Ok(output)
+}
 
-// migrate_fn generates the migrate fn which you'll have to call to migrate
-// the db
-fn migrate_expr<'a>(exprs: &'a Vec<SqlExpr>) -> Result<(Schema<'a>, TokenStream, &'a SqlExpr)> {
-    match exprs.iter().find(|expr| is_ddl(expr)) {
-        Some(migrate_expr) => {
-            // first we need the tables and columns defined across all
-            // exprs (but probably just the migrate fn)
-            let db_schema = db_schema(migrate_expr)?;
-            let migrate_fn = migrate_fn(migrate_expr);
-
-            Ok((db_schema, migrate_fn, migrate_expr))
-        }
-        None => {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                r#"You need a migration fn. Try this:
-              let migrate = r\#"create table YourTable (id integer primary key);"\#;
-                            "#,
-            ))
+fn table_names(db: &Sqlite, expr: &SqlExpr) -> syn::Result<Vec<String>> {
+    let mut output = vec![];
+    for stmt in &expr.statements {
+        match stmt {
+            Statement::Insert(Insert { table_name, .. }) => output.push(table_name.to_string()),
+            Statement::Update { table, .. } => output.extend(table_with_joins(&table)),
+            Statement::Delete(Delete { tables, from, .. }) => {
+                output.extend(tables.iter().map(|table| table.to_string()));
+                match from {
+                    sqlparser::ast::FromTable::WithFromKeyword(vec) => {
+                        output.extend(vec.iter().flat_map(table_with_joins));
+                    }
+                    sqlparser::ast::FromTable::WithoutKeyword(vec) => {
+                        output.extend(vec.iter().flat_map(table_with_joins));
+                    }
+                };
+            }
+            // easier to grab the table names from the sqlite c api
+            Statement::Query(_) => output.extend(db.table_names(&expr.sql).unwrap_or_default()),
+            _ => todo!(),
         }
     }
+    Ok(output)
+}
+
+fn table_with_joins(table: &TableWithJoins) -> Vec<String> {
+    let mut output = vec![];
+    output.extend(table_factor_tables(&table.relation));
+
+    for join in &table.joins {
+        output.extend(table_factor_tables(&join.relation));
+    }
+
+    output
+}
+
+fn table_factor_tables(table_factor: &TableFactor) -> Vec<String> {
+    match table_factor {
+        TableFactor::Table { name, .. } => vec![name.to_string()],
+        _ => todo!(),
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct SchemaRow {
+    table_name: String,
+    column_name: String,
+    column_type: String,
+    not_null: i64,
+    pk: i64,
+}
+
+impl static_sqlite_core::FromRow for SchemaRow {
+    fn from_row(
+        columns: Vec<(String, static_sqlite_core::Value)>,
+    ) -> static_sqlite_core::Result<Self> {
+        let mut row = SchemaRow::default();
+        for (name, value) in columns {
+            match name.as_str() {
+                "table_name" => row.table_name = value.try_into()?,
+                "column_name" => row.column_name = value.try_into()?,
+                "column_type" => row.column_type = value.try_into()?,
+                "not_null" => row.not_null = value.try_into()?,
+                "pk" => row.pk = value.try_into()?,
+                _ => {}
+            }
+        }
+
+        Ok(row)
+    }
+}
+
+fn schema(db: &Sqlite) -> HashMap<String, Vec<SchemaRow>> {
+    let rows: static_sqlite_core::Result<Vec<SchemaRow>> = db.query(
+        r#"
+        select
+            m.tbl_name as table_name,
+            p.name as column_name,
+            p."notnull" as not_null,
+            p.pk,
+            p.type as column_type
+        from sqlite_master m
+        join pragma_table_info(m.name) p
+        where m.type = 'table'
+            and m.tbl_name not like 'sqlite_%'
+        order by
+            m.tbl_name,
+            p.cid;"#,
+        &[],
+    );
+
+    match rows {
+        Ok(rows) => rows.into_iter().fold(HashMap::new(), |mut acc, row| {
+            acc.entry(row.table_name.clone())
+                .or_insert_with(Vec::new)
+                .push(row);
+            acc
+        }),
+        Err(_) => todo!(),
+    }
+}
+
+// Splits the SqlExpr into migrate (the first found ddl only one) and the others
+fn split_exprs<'a>(exprs: &'a Vec<SqlExpr>) -> Result<(&'a SqlExpr, Vec<&'a SqlExpr>)> {
+    // we need to find the one expr that has all ddl statements
+    // treat this as the migrate fn
+    // this also grabs the db schema
+    let mut iter = exprs.iter();
+    let migrate_expr = iter.find(|expr| is_ddl(expr)).ok_or(syn::Error::new(
+        Span::call_site(),
+        r#"You need a migration fn. Try this:
+              let migrate = r\#"create table YourTable (id integer primary key);"\#;
+                            "#,
+    ))?;
+    let exprs = iter.filter(|ex| !is_ddl(ex)).collect();
+
+    Ok((migrate_expr, exprs))
 }
 
 /// Generates the migrate fn tokens
@@ -141,527 +257,215 @@ fn migrate_fn(expr: &SqlExpr) -> TokenStream {
     quote! {
         pub async fn #ident(sqlite: &static_sqlite::Sqlite) -> Result<()> {
             let sql = #sql.to_string();
-            let _k = sqlite.call(move |conn| {
-                let sp = static_sqlite::savepoint(conn, "migrate")?;
-                let _k = static_sqlite::sync::execute_all(&sp, "create table if not exists __migrations__ (sql text primary key not null);");
-                for stmt in sql.split(";").filter(|s| !s.trim().is_empty()) {
-                    let mig: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
-                    let changed = static_sqlite::sync::execute(&sp, "insert into __migrations__ (sql) values (?) on conflict (sql) do nothing", vec![static_sqlite::Value::Text(mig)])?;
-                    if changed != 0 {
-                        let _k = static_sqlite::sync::execute_all(&sp, stmt)?;
-                    }
+            let _ = static_sqlite::execute_all(&sqlite, "create table if not exists __migrations__ (sql text primary key not null);".into()).await?;
+            for stmt in sql.split(";").filter(|s| !s.trim().is_empty()) {
+                let mig: String = stmt.chars().filter(|c| !c.is_whitespace()).collect();
+                let changed = static_sqlite::execute(&sqlite, "insert into __migrations__ (sql) values (:sql) on conflict (sql) do nothing".into(), vec![static_sqlite::Value::Text(mig)]).await?;
+                if changed != 0 {
+                    let _k = static_sqlite::execute(&sqlite, stmt.to_string(), vec![]).await?;
                 }
-                Ok(())
-            }).await?;
+            }
             return Ok(());
         }
     }
 }
 
-/// Validates a query schema against the db schema
-///
-/// Makes sure all tables and columns in the query_schema
-/// exist in the db_schema
-fn validate_query(
-    db_schema: &Schema<'_>,
-    query_schema: &Schema<'_>,
-    span: Span,
-) -> Option<TokenStream> {
-    let tokens = query_schema
-        .0
-        .iter()
-        .filter_map(|(table, query_columns)| match db_schema.0.get(table) {
-            Some(columns) => {
-                let extra_columns = query_columns
-                    .iter()
-                    .filter(|qc| {
-                        !columns
-                            .iter()
-                            .map(|col| col.name)
-                            .collect::<Vec<_>>()
-                            .contains(&qc.name)
-                    })
-                    .collect::<Vec<_>>();
+fn fn_tokens(db: &Sqlite, schema: &Schema, exprs: &[&SqlExpr]) -> Result<Vec<TokenStream>> {
+    let mut output = vec![];
+    for expr in exprs {
+        if let None = expr.statements.last() {
+            return Err(syn::Error::new(
+                expr.ident.span(),
+                "At least one sql statement is required",
+            ));
+        }
 
-                if !extra_columns.is_empty() {
-                    Some(
-                        Error::new(
-                            span,
-                            format!(
-                                r#"Column {} doesn't exist"#,
-                                extra_columns
-                                    .iter()
-                                    .map(|col| col.name.to_string())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            ),
-                        )
-                        .to_compile_error(),
-                    )
-                } else {
-                    None
+        let inputs = input_column_names(db, expr)?;
+        let inputs: Vec<_> = inputs
+            .iter()
+            .map(|input| input.replacen(":", "", 1))
+            .collect();
+        let mut table_names = table_names(db, expr)?;
+        // get joined table names that might not exist in select clause
+        table_names.extend(join_table_names(expr));
+        let mut schema_rows = vec![];
+        for table_name in &table_names {
+            match schema.get(table_name) {
+                Some(rows) => schema_rows.extend(rows),
+                None => {}
+            };
+        }
+        let input_schema_rows: Vec<&&SchemaRow> = inputs
+            .iter()
+            .filter_map(|col_name| schema_rows.iter().find(|row| &row.column_name == col_name))
+            .collect();
+        let fn_args = input_schema_rows
+            .iter()
+            .map(|field| {
+                let field_type = match field.column_type.as_str() {
+                    "BLOB" => quote! { Vec<u8> },
+                    "INTEGER" => quote! { i64 },
+                    "REAL" | "DOUBLE" => quote! { f64 },
+                    "TEXT" => quote! { impl ToString },
+                    _ => unimplemented!("Sqlite fn arg not supported"),
+                };
+                let field_name = Ident::new(&field.column_name, expr.ident.span());
+                let not_null = field.not_null;
+                let pk = field.pk;
+                match (pk, not_null) {
+                    (0, 0) => quote! { #field_name: Option<#field_type> },
+                    _ => quote! { #field_name: #field_type },
                 }
-            }
-            None => Some(
-                Error::new(span, format!("Table {} doesn't exist", table.0)).to_compile_error(),
-            ),
-        })
-        .collect::<Vec<_>>();
-
-    match tokens.is_empty() {
-        true => None,
-        false => Some(quote! { #(#tokens)* }),
-    }
-}
-
-fn fn_tokens(
-    span: Span,
-    expr: &SqlExpr,
-    db_schema: &Schema<'_>,
-    query_schema: &Schema<'_>,
-) -> Result<TokenStream> {
-    let SqlExpr {
-        ident,
-        sql,
-        statements,
-    } = expr;
-    let validated_tokens = validate_query(db_schema, query_schema, span);
-    match validated_tokens {
-        Some(tokens) => return Ok(tokens),
-        None => {}
-    };
-    let span = ident.span();
-    let statement = statements
-        .last()
-        .ok_or(Error::new(span, "Need at least one sql statement"))?;
-    let placeholder_len = placeholder_len(&statement);
-    let placeholder_cols = placeholder_columns(db_schema, query_schema);
-    match validate_placeholders(span, &placeholder_cols, placeholder_len) {
-        Some(tokens) => return Ok(tokens),
-        None => {}
-    };
-    if !is_ddl(expr) {
-        let fn_args = fn_arg_tokens(span, &placeholder_cols);
-        let params = param_tokens(span, &placeholder_cols);
-        let (return_stmt, return_ty) = return_tokens(statement);
-        let generic = generic_token(statement);
-
-        Ok(quote! {
-            #[doc = #sql]
-            pub async fn #ident(sqlite: &static_sqlite::Sqlite, #(#fn_args),*) -> static_sqlite::Result<#return_ty> {
-                let sql = #sql.to_string();
-                let rows: Vec<#generic> = sqlite.call(move |conn| conn.query(#sql, #params)).await?;
-
-                #return_stmt
-            }
-        })
-    } else {
-        Ok(quote! {})
-    }
-}
-
-fn validate_placeholders(
-    span: Span,
-    placeholder_cols: &[&Column<'_>],
-    placeholder_len: usize,
-) -> Option<TokenStream> {
-    if placeholder_cols.len() != placeholder_len {
-        return Some(
-            Error::new(
-                span,
-                format!(
-                    "{} {} != {} {}",
-                    placeholder_len,
-                    match placeholder_len {
-                        1 => "placeholder",
-                        _ => "placeholders",
-                    },
-                    placeholder_cols.len(),
-                    match placeholder_cols.len() {
-                        1 => "column",
-                        _ => "columns",
-                    },
-                ),
-            )
-            .to_compile_error(),
-        );
-    } else {
-        None
-    }
-}
-
-fn generic_token(stmt: &Statement) -> TokenStream {
-    statement_table(stmt)
-}
-
-fn placeholder_columns<'a>(
-    db_schema: &'a Schema<'_>,
-    schema: &'a Schema<'_>,
-) -> Vec<&'a Column<'a>> {
-    schema
-        .0
-        .iter()
-        .flat_map(|(table, columns)| {
-            let db_columns = match db_schema.0.get(table) {
-                Some(db_columns) => db_columns,
-                None => todo!(),
-            };
-            columns
-                .iter()
-                .filter_map(
-                    |col| match db_columns.iter().find(|db_col| db_col.name == col.name) {
-                        Some(db_col) => match col.placeholder {
-                            Some(_) => Some(db_col),
-                            None => None,
-                        },
-                        None => None,
-                    },
-                )
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn fn_arg_tokens<'a>(span: Span, placeholders: &'a Vec<&'a Column<'a>>) -> Vec<TokenStream> {
-    placeholders
-        .iter()
-        .map(|Column { name, def, .. }| {
-            let name = syn::Ident::new(&name.to_string(), span);
-            let not_null = match def {
-                Some(def) => def.options.iter().any(|opt| match &opt.option {
-                    sqlparser::ast::ColumnOption::NotNull => true,
-                    sqlparser::ast::ColumnOption::Unique { is_primary, .. } => *is_primary,
-                    _ => false,
-                }),
-                None => false,
-            };
-            let field_type = match def {
-                Some(ColumnDef { data_type, .. }) => match data_type {
-                    DataType::Blob(_) => quote! { Vec<u8> },
-                    DataType::Integer(_) => quote! { i64 },
-                    DataType::Real => quote! { f64 },
-                    DataType::Text => {
-                        quote! { impl ToString + Send + Sync + 'static }
+            })
+            .collect::<Vec<TokenStream>>();
+        let params = input_schema_rows
+            .iter()
+            .map(|field| {
+                let not_null = field.not_null;
+                let name = Ident::new(&field.column_name, expr.ident.span());
+                match field.column_type.as_str() {
+                    "BLOB" => {
+                        quote! { #name.into() }
                     }
-                    _ => todo!("fn_args insert statement data_type"),
-                },
-                None => todo!("fn_args insert statement data_type no column def"),
-            };
-
-            match not_null {
-                true => quote! { #name: #field_type },
-                false => quote! { #name: Option<#field_type> },
-            }
-        })
-        .collect()
-}
-
-fn struct_tokens(schema: &Schema<'_>, expr: &SqlExpr) -> Result<Vec<TokenStream>> {
-    let span = expr.ident.span();
-
-    schema.0.iter().map(|(table, columns)| {
-        let column_defs = columns.iter().filter_map(|col| col.def).collect::<Vec<_>>();
-        let ident = struct_ident(span, table);
-        let fields = struct_fields(span, &column_defs);
-        let match_stmt = match_tokens(span, &column_defs);
-
-        Ok(match ident {
-            Some(ident) => quote! {
-                #[derive(Default, Debug, Clone, PartialEq)]
-                pub struct #ident { #(#fields,)* }
-
-                impl static_sqlite::FromRow for #ident {
-                    fn from_row(columns: Vec<(String, static_sqlite::Value)>) -> static_sqlite::Result<Self> {
-                        let mut row = #ident::default();
-                        for (column, value) in columns {
-                            match column.as_str() {
-                                #(#match_stmt,)*
-                                _ => {}
+                    "INTEGER" => quote! { #name.into() },
+                    "REAL" | "DOUBLE" => quote! { #name.into() },
+                    "TEXT" => match not_null {
+                        1 => quote! {
+                            #name.to_string().into()
+                        },
+                        0 => quote! {
+                            match #name {
+                                Some(val) => val.to_string().into(),
+                                None => static_sqlite::Value::Null
                             }
-                        }
-
-                        Ok(row)
-                    }
-                }
-            },
-            None => quote! {},
-        })
-    }).collect()
-}
-
-fn struct_ident(span: Span, Table(ObjectName(parts)): &Table<'_>) -> Option<Ident> {
-    let ident = match parts.as_slice() {
-        [_, table, _] => Some(table),
-        [table, _] => Some(table),
-        [table] => Some(table),
-        _ => None,
-    };
-
-    match ident {
-        Some(ident) => Some(Ident::new(&ident.to_string(), span)),
-        None => None,
-    }
-}
-
-fn struct_fields(span: Span, columns: &Vec<&ColumnDef>) -> Vec<TokenStream> {
-    columns
-        .iter()
-        .map(|def| {
-            let not_null = def.options.iter().any(|opt| match &opt.option {
-                sqlparser::ast::ColumnOption::NotNull => true,
-                sqlparser::ast::ColumnOption::Unique { is_primary, .. } => *is_primary,
-                _ => false,
-            });
-            let field_type = match def.data_type {
-                DataType::Blob(_) => quote! { Vec<u8> },
-                DataType::Integer(_) => quote! { i64 },
-                DataType::Real | DataType::Double => quote! { f64 },
-                DataType::Text => quote! { String },
-                _ => todo!("struct_fields insert statement data_type"),
-            };
-            let name = Ident::new(&def.name.to_string(), span);
-
-            match not_null {
-                true => quote! { #name: #field_type },
-                false => quote! { #name: Option<#field_type> },
-            }
-        })
-        .collect()
-}
-
-fn match_tokens(span: Span, columns: &Vec<&ColumnDef>) -> Vec<TokenStream> {
-    columns
-        .iter()
-        .map(|def| {
-            let lit_str = &def.name.to_string();
-            let ident = Ident::new(lit_str, span);
-
-            quote! {
-                #lit_str => row.#ident = value.try_into()?
-            }
-        })
-        .collect()
-}
-
-fn return_tokens(stmt: &Statement) -> (TokenStream, TokenStream) {
-    let return_ty = return_ty(stmt);
-    let return_stmt = return_stmt(stmt);
-
-    (return_stmt, return_ty)
-}
-
-fn return_stmt(stmt: &Statement) -> TokenStream {
-    let single_row = quote! {
-        match rows.into_iter().nth(0) {
-            Some(row) => Ok(row),
-            None => Err(static_sqlite::Error::RowNotFound)
-        }
-    };
-    let nothing = quote! {Ok(())};
-
-    let rows = quote! {
-    Ok(rows)};
-    match stmt {
-        Statement::Insert { returning, .. }
-        | Statement::Update { returning, .. }
-        | Statement::Delete { returning, .. } => match returning {
-            Some(_) => single_row,
-            None => nothing,
-        },
-        Statement::Query(query) => {
-            let limit = match query.limit.as_ref() {
-                Some(expr) => match expr {
-                    sqlparser::ast::Expr::Value(sqlparser::ast::Value::Number(limit, _)) => {
-                        limit.parse().ok()
-                    }
-                    _ => None,
-                },
-                None => None,
-            };
-
-            match limit {
-                Some(1) => single_row,
-                Some(_) | None => rows,
-            }
-        }
-        _ => todo!("fn return_stmt"),
-    }
-}
-
-fn return_ty(stmt: &Statement) -> TokenStream {
-    match stmt {
-        Statement::Insert {
-            table_name: ObjectName(parts),
-            returning,
-            ..
-        } => return_ty_from_returning_or_parts(returning, parts),
-        Statement::Update {
-            table: TableWithJoins { relation, .. },
-            returning,
-            ..
-        } => match relation {
-            TableFactor::Table {
-                name: ObjectName(parts),
-                ..
-            } => return_ty_from_returning_or_parts(returning, parts),
-            _ => todo!("return_ty update relation TableFactor"),
-        },
-        Statement::Delete {
-            from, returning, ..
-        } => match from.first() {
-            Some(TableWithJoins {
-                relation:
-                    TableFactor::Table {
-                        name: ObjectName(parts),
-                        ..
-                    },
-                ..
-            }) => return_ty_from_returning_or_parts(returning, parts),
-            _ => todo!("return_ty delete without a from"),
-        },
-        Statement::Query(query) => {
-            let tables = query_table_names(query);
-            match tables.first() {
-                Some(ObjectName(parts)) => {
-                    let ident = parts_ident(parts);
-                    let limit = match query.limit.as_ref() {
-                        Some(expr) => match expr {
-                            sqlparser::ast::Expr::Value(sqlparser::ast::Value::Number(
-                                limit,
-                                _,
-                            )) => limit.parse().ok(),
-                            _ => None,
                         },
-                        None => None,
-                    };
-
-                    match limit {
-                        Some(1) => ident,
-                        Some(_) | None => quote! { Vec<#ident> },
-                    }
+                        _ => unreachable!(),
+                    },
+                    _ => unimplemented!("Sqlite param not supported"),
                 }
-                None => todo!("fn return_ty mutliple from tables"),
-            }
-        }
-        statement => todo!("return_ty other statements {}", statement),
-    }
-}
+            })
+            .collect::<Vec<TokenStream>>();
+        let ident = &expr.ident;
+        let outputs = output_column_names(db, expr)?;
+        let pascal_case = snake_to_pascal_case(&ident);
+        let cols: Vec<SchemaRow> = outputs
+            .iter()
+            .filter_map(|col_name| {
+                schema_rows
+                    .iter()
+                    .find(|row| &row.column_name == col_name)
+                    .cloned()
+                    .cloned()
+            })
+            .collect();
+        let struct_tokens = struct_tokens(expr.ident.span(), &pascal_case, &cols);
+        let sql = &expr.sql;
+        output.push(quote! {
+            #struct_tokens
 
-fn return_ty_from_returning_or_parts(
-    returning: &Option<Vec<SelectItem>>,
-    fn_parts: &Vec<sqlparser::ast::Ident>,
-) -> TokenStream {
-    let parts = match returning {
-        Some(cols) => match cols.as_slice() {
-            [SelectItem::QualifiedWildcard(ObjectName(parts), _)] => Some(parts),
-            [SelectItem::Wildcard(_)] => Some(fn_parts),
-            _ => todo!("return_ty insert statement"),
-        },
-        None => None,
-    };
-
-    match parts {
-        Some(parts) => parts_ident(parts),
-        None => quote! { () },
-    }
-}
-
-fn parts_ident(parts: &Vec<sqlparser::ast::Ident>) -> TokenStream {
-    let ident = match parts.as_slice() {
-        [_schema, table, _] => Some(table),
-        [table, _] => Some(table),
-        [table] => Some(table),
-        _ => None,
-    };
-
-    match ident {
-        Some(ident) => {
-            let ident = Ident::new(&ident.to_string(), Span::call_site());
-            quote! { #ident }
-        }
-        None => quote! { () },
-    }
-}
-
-fn statement_table(stmt: &Statement) -> TokenStream {
-    match stmt {
-        Statement::Insert {
-            table_name: ObjectName(parts),
-            returning,
-            ..
-        } => return_ty_from_returning_or_parts(returning, parts),
-        Statement::Update {
-            table: TableWithJoins { relation, .. },
-            returning,
-            ..
-        } => match relation {
-            TableFactor::Table {
-                name: ObjectName(parts),
-                ..
-            } => return_ty_from_returning_or_parts(returning, parts),
-            _ => todo!("return_ty update relation TableFactor"),
-        },
-        Statement::Delete {
-            from, returning, ..
-        } => match from.first() {
-            Some(TableWithJoins {
-                relation:
-                    TableFactor::Table {
-                        name: ObjectName(parts),
-                        ..
-                    },
-                ..
-            }) => return_ty_from_returning_or_parts(returning, parts),
-            _ => todo!("return_ty delete without a from"),
-        },
-        Statement::Query(query) => {
-            let tables = query_table_names(query);
-            match tables.first() {
-                Some(ObjectName(parts)) => parts_ident(parts),
-                None => todo!("multiple table names in statement table"),
-            }
-        }
-        stmt => todo!("statement table other statements {}", stmt),
-    }
-}
-
-fn param_tokens<'a>(span: Span, placeholders: &'a Vec<&'a Column<'a>>) -> TokenStream {
-    let tokens: Vec<TokenStream> = placeholders
-        .iter()
-        .map(|Column { name, def, .. }| {
-            let name = Ident::new(&name.to_string(), span);
-            let def = match def {
-                Some(def) => def,
-                None => todo!("params col without def"),
-            };
-            let not_null = def.options.iter().any(|opt| match &opt.option {
-                sqlparser::ast::ColumnOption::NotNull => true,
-                sqlparser::ast::ColumnOption::Unique { is_primary, .. } => *is_primary,
-                _ => false,
-            });
-            match &def.data_type {
-                DataType::Blob(_) => {
-                    quote! { #name.into() }
-                }
-                DataType::Integer(_x) => quote! { #name.into() },
-                DataType::Real | DataType::Double => quote! { #name.into() },
-                DataType::Text => match not_null {
-                    true => quote! {
-                        #name.to_string().into()
-                    },
-                    false => quote! {
-                        match #name {
-                            Some(val) => val.to_string().into(),
-                            None => static_sqlite::Value::Null
-                        }
-                    },
-                },
-                _ => todo!("fn_args insert statement data_type"),
+            #[doc = #sql]
+            pub async fn #ident(db: &static_sqlite::Sqlite, #(#fn_args),*) -> Result<Vec<#pascal_case>> {
+                let rows: Vec<#pascal_case> = static_sqlite::query(db, #sql, vec![#(#params,)*]).await?;
+                Ok(rows)
             }
         })
-        .collect();
+    }
+    Ok(output)
+}
 
-    quote! { &[#(#tokens,)*] }
+fn join_table_names(expr: &&SqlExpr) -> Vec<String> {
+    let mut output = vec![];
+    visit_relations(&expr.statements, |rel| {
+        output.push(rel.to_string());
+        ControlFlow::<()>::Continue(())
+    });
+    output
+}
+
+fn snake_to_pascal_case(input: &syn::Ident) -> syn::Ident {
+    let s = input.to_string();
+    let mut result = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+
+    for ch in s.chars() {
+        if ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.extend(ch.to_uppercase());
+            capitalize_next = false;
+        } else {
+            result.extend(ch.to_lowercase());
+        }
+    }
+
+    syn::Ident::new(&result, input.span())
+}
+
+type Schema = HashMap<String, Vec<SchemaRow>>;
+
+fn structs_tokens(span: Span, schema: &Schema) -> Vec<TokenStream> {
+    schema
+        .iter()
+        .map(|(table, cols)| {
+            let ident = proc_macro2::Ident::new(&table, span);
+            struct_tokens(span, &ident, cols)
+        })
+        .collect()
+}
+
+fn struct_tokens(span: Span, ident: &Ident, cols: &Vec<SchemaRow>) -> TokenStream {
+    let struct_fields = cols.iter().map(|row| {
+        let field_type = field_type(row);
+        let name = Ident::new(&row.column_name, span);
+        let optional = match (row.not_null, row.pk) {
+            (0, 0) => true,
+            (0, 1) | (1, 0) | (1, 1) => false,
+            _ => unreachable!(),
+        };
+
+        match optional {
+            true => quote! { pub #name: Option<#field_type> },
+            false => quote! { pub #name: #field_type },
+        }
+    });
+    let match_stmt = cols.iter().map(|field| {
+        let name = Ident::new(&field.column_name, span);
+        let lit_str = LitStr::new(&field.column_name, span);
+
+        quote! {
+            #lit_str => row.#name = value.try_into()?
+        }
+    });
+    let tokens = quote! {
+        #[derive(Default, Debug, Clone, PartialEq)]
+        pub struct #ident { #(#struct_fields),* }
+
+        impl static_sqlite::FromRow for #ident {
+            fn from_row(columns: Vec<(String, static_sqlite::Value)>) -> static_sqlite::Result<Self> {
+                let mut row = #ident::default();
+                for (column, value) in columns {
+                    match column.as_str() {
+                        #(#match_stmt,)*
+                        _ => {}
+                    }
+                }
+
+                Ok(row)
+            }
+        }
+    };
+
+    tokens
+}
+
+fn field_type(row: &SchemaRow) -> TokenStream {
+    match row.column_type.as_str() {
+        "BLOB" => quote! { Vec<u8> },
+        "INTEGER" => quote! { i64 },
+        "REAL" | "DOUBLE" => quote! { f64 },
+        "TEXT" => quote! { String },
+        _ => todo!("field_type"),
+    }
 }
 
 #[derive(Clone, Debug)]
