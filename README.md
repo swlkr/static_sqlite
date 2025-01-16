@@ -23,7 +23,7 @@ sql! {
 
     let insert_user = r#"
         insert into User (name)
-        values (?)
+        values (:name)
         returning *
     "#;
 }
@@ -32,7 +32,8 @@ sql! {
 async fn main() -> Result<()> {
     let db = static_sqlite::open("db.sqlite3").await?;
     let _ = migrate(&db).await?;
-    let user = insert_user(&db, "swlkr").await?;
+    let users = insert_user(&db, "swlkr").await?;
+    let user = users.first().unwrap();
 
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr");
