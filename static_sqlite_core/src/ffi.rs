@@ -1,53 +1,21 @@
-use std::{
-    ffi::{c_char, c_int, c_long, c_void, CStr, CString, NulError},
-    num::TryFromIntError,
-    ops::Deref,
-    os::raw::c_double,
+use static_sqlite_ffi::{
+    sqlite3, sqlite3_bind_blob, sqlite3_bind_double, sqlite3_bind_int64, sqlite3_bind_null,
+    sqlite3_bind_parameter_count, sqlite3_bind_parameter_name, sqlite3_bind_text, sqlite3_changes,
+    sqlite3_close, sqlite3_column_bytes, sqlite3_column_count, sqlite3_column_double,
+    sqlite3_column_int64, sqlite3_column_name, sqlite3_column_origin_name,
+    sqlite3_column_table_name, sqlite3_column_text, sqlite3_column_type, sqlite3_errmsg,
+    sqlite3_finalize, sqlite3_open, sqlite3_prepare_v2, sqlite3_step, sqlite3_stmt,
 };
 
-#[link(name = "sqlite3")]
-extern "C" {
-    fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut c_int) -> c_int;
-    fn sqlite3_close(db: *mut c_int) -> c_int;
-    fn sqlite3_prepare_v2(
-        db: *mut c_int,
-        zSql: *const c_char,
-        nByte: c_int,
-        ppStmt: *mut *mut c_void,
-        pzTail: *mut *const c_char,
-    ) -> c_int;
-    fn sqlite3_bind_text(
-        stmt: *mut c_void,
-        index: c_int,
-        text: *const c_char,
-        len: c_int,
-        destructor: *const c_void,
-    ) -> c_int;
-    fn sqlite3_bind_int(stmt: *mut c_void, index: c_int, value: c_long) -> c_int;
-    fn sqlite3_bind_double(stmt: *mut c_void, index: c_int, value: c_double) -> c_int;
-    fn sqlite3_bind_blob(
-        stmt: *mut c_void,
-        index: c_int,
-        value: *const c_void,
-        len: c_int,
-        destructor: *const c_void,
-    ) -> c_int;
-    fn sqlite3_bind_null(stmt: *mut c_void, index: c_int) -> c_int;
-    fn sqlite3_step(stmt: *mut c_void) -> c_int;
-    fn sqlite3_finalize(stmt: *mut c_void) -> c_int;
-    fn sqlite3_errmsg(db: *mut c_int) -> *const c_char;
-    fn sqlite3_column_count(stmt: *mut c_void) -> c_int;
-    fn sqlite3_column_type(stmt: *mut c_void, iCol: c_int) -> c_int;
-    fn sqlite3_column_name(stmt: *mut c_void, N: c_int) -> *const c_char;
-    fn sqlite3_column_int64(stmt: *mut c_void, iCol: c_int) -> i64;
-    fn sqlite3_column_double(stmt: *mut c_void, iCol: c_int) -> f64;
-    fn sqlite3_column_text(stmt: *mut c_void, iCol: c_int) -> *const u8;
-    fn sqlite3_column_bytes(stmt: *mut c_void, iCol: c_int) -> c_int;
-    fn sqlite3_changes(db: *mut c_int) -> c_int;
-}
+use std::{
+    ffi::{c_char, c_int, CStr, CString, NulError},
+    num::TryFromIntError,
+    ops::Deref,
+    str::Utf8Error,
+};
 
-const SQLITE_ROW: i32 = 100;
-const SQLITE_DONE: i32 = 101;
+const SQLITE_ROW: i32 = static_sqlite_ffi::SQLITE_ROW as i32;
+const SQLITE_DONE: i32 = static_sqlite_ffi::SQLITE_DONE as i32;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -65,13 +33,15 @@ pub enum Error {
     ConnectionClosed,
     #[error("sqlite row not found")]
     RowNotFound,
+    #[error(transparent)]
+    Utf8Error(#[from] Utf8Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone)]
 pub struct Sqlite {
-    db: *mut core::ffi::c_int,
+    db: *mut static_sqlite_ffi::sqlite3,
 }
 
 unsafe impl Sync for Sqlite {}
@@ -80,11 +50,11 @@ unsafe impl Send for Sqlite {}
 impl Sqlite {
     pub fn open(path: &str) -> Result<Self> {
         let c_path = CString::new(path)?;
-        let mut db: *mut i32 = core::ptr::null_mut();
+        let mut db: *mut sqlite3 = core::ptr::null_mut();
 
         unsafe {
             if sqlite3_open(c_path.as_ptr(), &mut db) != 0 {
-                let error = CStr::from_ptr(sqlite3_errmsg(db))
+                let error = CStr::from_ptr(static_sqlite_ffi::sqlite3_errmsg(db))
                     .to_string_lossy()
                     .into_owned();
                 return Err(Error::Sqlite(error));
@@ -94,9 +64,9 @@ impl Sqlite {
         Ok(Sqlite { db })
     }
 
-    pub fn prepare(&self, sql: &str, params: &[Value]) -> Result<*mut c_void> {
+    pub fn prepare(&self, sql: &str, params: &[Value]) -> Result<*mut sqlite3_stmt> {
         let c_sql = CString::new(sql)?;
-        let mut stmt: *mut c_void = std::ptr::null_mut();
+        let mut stmt: *mut sqlite3_stmt = core::ptr::null_mut();
         unsafe {
             if sqlite3_prepare_v2(self.db, c_sql.as_ptr(), -1, &mut stmt, std::ptr::null_mut()) != 0
             {
@@ -114,11 +84,11 @@ impl Sqlite {
                                 (i + 1) as i32,
                                 s.as_ptr() as *const _,
                                 s.len() as c_int,
-                                std::ptr::null(),
+                                None,
                             );
                         }
                         Value::Integer(n) => {
-                            sqlite3_bind_int(stmt, (i + 1) as i32, *n);
+                            sqlite3_bind_int64(stmt, (i + 1) as i32, *n);
                         }
                         Value::Real(f) => {
                             sqlite3_bind_double(stmt, (i + 1) as i32, *f);
@@ -129,7 +99,7 @@ impl Sqlite {
                                 (i + 1) as i32,
                                 b.as_ptr() as *const _,
                                 b.len() as c_int,
-                                std::ptr::null(),
+                                None,
                             );
                         }
                         Value::Null => {
@@ -148,8 +118,7 @@ impl Sqlite {
             let stmt = self.prepare(&sql, &params)?;
 
             loop {
-                let code = sqlite3_step(stmt);
-                match code {
+                match sqlite3_step(stmt) {
                     SQLITE_ROW | SQLITE_DONE => {
                         break;
                     }
@@ -178,7 +147,7 @@ impl Sqlite {
         self.execute(sql, vec![])
     }
 
-    pub fn query<T: FromRow>(&self, sql: &str, params: &[Value]) -> Result<Vec<T>> {
+    pub fn query<T: FromRow>(&self, sql: &'static str, params: &[Value]) -> Result<Vec<T>> {
         unsafe {
             let stmt = self.prepare(sql, params)?;
             let mut rows = Vec::new();
@@ -292,6 +261,92 @@ impl Sqlite {
     pub fn savepoint<'a>(&'a self, sqlite: &'a Sqlite, name: &'a str) -> Result<Savepoint<'a>> {
         Savepoint::new(sqlite, name)
     }
+
+    pub fn column_names(&self, sql: &str) -> Result<Vec<String>> {
+        let mut columns = Vec::new();
+        unsafe {
+            let stmt = self.prepare(sql, &[])?;
+            let count = sqlite3_column_count(stmt);
+            for i in 0..count {
+                let name_ptr = sqlite3_column_origin_name(stmt, i);
+
+                if !name_ptr.is_null() {
+                    let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+                    columns.push(name);
+                }
+            }
+        }
+
+        Ok(columns)
+    }
+
+    pub fn aliased_column_names(&self, sql: &str) -> Result<Vec<String>> {
+        let mut columns = Vec::new();
+        unsafe {
+            let stmt = self.prepare(sql, &[])?;
+            let count = sqlite3_column_count(stmt);
+            for i in 0..count {
+                let name_ptr = sqlite3_column_name(stmt, i);
+
+                if !name_ptr.is_null() {
+                    let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+                    columns.push(name);
+                }
+            }
+        }
+
+        Ok(columns)
+    }
+
+    pub fn table_names(&self, sql: &str) -> Result<Vec<String>> {
+        let mut tables = Vec::new();
+        unsafe {
+            let stmt = self.prepare(sql, &[])?;
+            let count = sqlite3_column_count(stmt);
+            for i in 0..count {
+                let name_ptr = sqlite3_column_table_name(stmt, i);
+
+                if !name_ptr.is_null() {
+                    let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+                    tables.push(name);
+                }
+            }
+        }
+
+        Ok(tables)
+    }
+
+    pub fn bind_param_names(&self, sql: &str) -> Result<Vec<String>> {
+        let mut params = Vec::new();
+
+        unsafe {
+            let stmt = self.prepare(sql, &[])?;
+            let param_count = sqlite3_bind_parameter_count(stmt);
+
+            for i in 1..param_count + 1 {
+                let name_ptr = sqlite3_bind_parameter_name(stmt, i);
+                if !name_ptr.is_null() {
+                    let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
+                    params.push(name);
+                }
+            }
+            self.finalize(stmt)?;
+        }
+
+        Ok(params)
+    }
+
+    fn finalize(&self, stmt: *mut sqlite3_stmt) -> Result<()> {
+        unsafe {
+            if sqlite3_finalize(stmt) != 0 {
+                let error = CStr::from_ptr(sqlite3_errmsg(self.db))
+                    .to_string_lossy()
+                    .into_owned();
+                return Err(Error::Sqlite(error));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for Sqlite {
@@ -342,6 +397,15 @@ pub enum Value {
     Integer(i64),
     Real(f64),
     Blob(Vec<u8>),
+    Null,
+}
+
+#[derive(Debug, Clone)]
+pub enum DataType {
+    Text,
+    Integer,
+    Real,
+    Blob,
     Null,
 }
 

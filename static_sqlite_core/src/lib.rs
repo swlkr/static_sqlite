@@ -1,7 +1,6 @@
-pub use crate::ffi::Sqlite;
-use crate::{FromRow, Result, Savepoint, Value};
+mod ffi;
+pub use ffi::{DataType, Error, FromRow, Result, Savepoint, Sqlite, Value};
 
-#[allow(unused)]
 pub fn open(path: &str) -> Result<Sqlite> {
     Sqlite::open(path)
 }
@@ -14,10 +13,9 @@ pub fn execute_all(conn: &Sqlite, sql: &str) -> Result<i32> {
     conn.execute(sql, vec![])
 }
 
-#[allow(unused)]
 pub fn query<T: FromRow + Send + 'static>(
     conn: &Sqlite,
-    sql: &str,
+    sql: &'static str,
     params: &[Value],
 ) -> Result<Vec<T>> {
     conn.query(sql, params)
@@ -60,4 +58,29 @@ where
     set_user_version(&sp, migrations.len())?;
 
     Ok(())
+}
+
+impl FromRow for () {
+    fn from_row(_columns: Vec<(String, Value)>) -> Result<Self> {
+        Ok(())
+    }
+}
+
+pub trait FirstRow<T>
+where
+    T: FromRow,
+{
+    fn first_row(self) -> Result<T>;
+}
+
+impl<T> FirstRow<T> for Vec<T>
+where
+    T: FromRow,
+{
+    fn first_row(self) -> Result<T> {
+        match self.into_iter().nth(0) {
+            Some(row) => Ok(row),
+            None => Err(Error::RowNotFound),
+        }
+    }
 }

@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-thiserror = "1"
 static_sqlite_macros = { path = "static_sqlite_macros", version = "0.1.0" }
-tokio = { version = "1", features = ["sync"] }
-crossbeam-channel = { version = "0.5" }
+static_sqlite_core = { path = "static_sqlite_core", version = "0.1.0" }
+static_sqlite_async = { path = "static_sqlite_async", version = "0.1.0" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
+trybuild = "1.0"
+
+[workspace]
+members = ["static_sqlite_core", "static_sqlite_async", "static_sqlite_ffi"]
 
 [[test]]
 name = "integration_test"

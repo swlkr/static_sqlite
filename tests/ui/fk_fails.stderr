@@ -1,0 +1,11 @@
+error: MissingTable("Users")
+ --> tests/ui/fk_fails.rs:4:9
+  |
+4 |     let migrate = r#"
+  |         ^^^^^^^
+
+error[E0601]: `main` function not found in crate `$CRATE`
+  --> tests/ui/fk_fails.rs:15:2
+   |
+15 | }
+   |  ^ consider adding a `main` function to `$DIR/tests/ui/fk_fails.rs`

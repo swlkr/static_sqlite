@@ -1,7 +1,7 @@
-use static_sqlite::{sql, Result, Sqlite};
+use static_sqlite::{sql, FirstRow, Result, Sqlite};
 
 #[tokio::test]
-async fn migrate_table_works() -> Result<()> {
+async fn where_clause_works() -> Result<()> {
     sql! {
         let migrate = r#"
             create table User (
@@ -13,11 +13,11 @@ async fn migrate_table_works() -> Result<()> {
         "#;
 
         let insert_user = r#"
-            insert into User (email) values (?) on conflict (email) do update set email = excluded.email
+            insert into User (email) values (:email) on conflict (email) do update set email = excluded.email
         "#;
 
         let insert_user_created = r#"
-            insert into User (email, created_at) values (?, ?) on conflict (email) do update set email = excluded.email returning *
+            insert into User (email, created_at) values (:email, :created_at) on conflict (email) do update set email = excluded.email returning *
         "#;
     }
 
@@ -27,7 +27,7 @@ async fn migrate_table_works() -> Result<()> {
     insert_user(&db, email).await?;
 
     let email = "f@f.com";
-    let user = insert_user_created(&db, email, Some(1)).await?;
+    let user = insert_user_created(&db, email, Some(1)).await?.first_row()?;
 
     assert_eq!(user.id, 2);
     assert_eq!(user.email, "f@f.com");
@@ -46,14 +46,14 @@ async fn option_type_works() -> Result<()> {
         "#;
 
         let insert_row = r#"
-            insert into Row (txt) values (?) returning *
+            insert into Row (txt) values (:txt) returning *
         "#;
     }
 
     let db = static_sqlite::open(":memory:").await?;
     let _k = migrate(&db).await?;
     let txt = Some("txt");
-    let row = insert_row(&db, txt).await?;
+    let row = insert_row(&db, txt).await?.first_row()?;
 
     assert_eq!(row.txt, Some("txt".into()));
 
@@ -102,9 +102,18 @@ async fn it_works() -> Result<()> {
                 nullable_blob
             )
             values (
-                ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?, ?
+                :not_null_text,
+                :not_null_integer,
+                :not_null_real,
+                :not_null_blob,
+                :null_text,
+                :null_integer,
+                :null_real,
+                :null_blob,
+                :nullable_text,
+                :nullable_integer,
+                :nullable_real,
+                :nullable_blob
             )
             returning *
         "#;
@@ -145,11 +154,11 @@ async fn it_works() -> Result<()> {
         Some(2.0),
         Some(vec![0xFE, 0xED]),
     )
-    .await?;
+    .await?.first_row()?;
 
     assert_eq!(
         row,
-        Row {
+        InsertRow {
             not_null_text: "not_null_text".into(),
             not_null_integer: 1,
             not_null_real: 1.,
@@ -186,14 +195,14 @@ async fn readme_works() -> Result<()> {
 
         let insert_user = r#"
             insert into User (name)
-            values (?)
+            values (:name)
             returning *
         "#;
     }
 
     let db = static_sqlite::open(":memory:").await?;
     let _ = migrate(&db).await?;
-    let user = insert_user(&db, "swlkr").await?;
+    let user = insert_user(&db, "swlkr").await?.first_row()?;
 
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr");
@@ -213,16 +222,16 @@ async fn crud_works() -> Result<()> {
 
         let insert_user = r#"
             insert into User (name)
-            values (?)
+            values (:name)
             returning *
         "#;
 
         let update_user = r#"
-            update User set name = ? where id = ? returning *
+            update User set name = :name where id = :id returning *
         "#;
 
         let delete_user = r#"
-            delete from User where id = ?
+            delete from User where id = :id
         "#;
 
         let all_users = r#"
@@ -232,7 +241,7 @@ async fn crud_works() -> Result<()> {
 
     let db = static_sqlite::open(":memory:").await?;
     let _ = migrate(&db).await?;
-    let user = insert_user(&db, "swlkr").await?;
+    let user = insert_user(&db, "swlkr").await?.first_row()?;
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr");
 
@@ -242,7 +251,7 @@ async fn crud_works() -> Result<()> {
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr");
 
-    let user = update_user(&db, "swlkr2", 1).await?;
+    let user = update_user(&db, "swlkr2", 1).await?.first_row()?;
     assert_eq!(user.id, 1);
     assert_eq!(user.name, "swlkr2");
 
@@ -253,23 +262,8 @@ async fn crud_works() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn alter_table_ref_checks_tables() -> Result<()> {
-    sql! {
-        let migrate = r#"
-            create table User (
-                id integer primary key,
-                email text unique not null
-            );
-
-            create table Todo (
-                id integer primary key,
-                user_id integer not null references User(id)
-            );
-        "#;
-    }
-    let db = static_sqlite::open(":memory:").await?;
-    migrate(&db).await?;
-
-    Ok(())
+#[test]
+fn ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/*.rs");
 }

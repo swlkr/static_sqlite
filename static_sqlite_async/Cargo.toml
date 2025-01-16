@@ -1,0 +1,9 @@
+[package]
+name = "static_sqlite_async"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+static_sqlite_core = { path = "../static_sqlite_core", version = "0.1.0" }
+tokio = { version = "1", features = ["sync"] }
+crossbeam-channel = { version = "0.5" }
