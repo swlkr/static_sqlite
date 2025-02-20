@@ -2,6 +2,7 @@
 name = "static_sqlite"
 version = "0.1.0"
 edition = "2021"
+resolver = "2"
 
 [dependencies]
 static_sqlite_macros = { path = "static_sqlite_macros", version = "0.1.0" }
