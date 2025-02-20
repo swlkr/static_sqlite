@@ -100,13 +100,92 @@ fn sql_macro(exprs: Vec<SqlExpr>) -> syn::Result<TokenStream> {
     let schema = schema(&db);
     let structs = structs_tokens(migrate_expr.ident.span(), &schema);
     let fns = fn_tokens(&db, &schema, &exprs)?;
+    let traits = trait_tokens(&schema, &exprs);
     let output = quote! {
         #(#structs)*
         #(#fns)*
+        #(#traits)*
         #migrate_fn
     };
 
     Ok(output)
+}
+
+fn trait_tokens(schema: &HashMap<String, Vec<SchemaRow>>, exprs: &[&SqlExpr]) -> Vec<TokenStream> {
+    exprs
+        .iter()
+        .flat_map(|expr| {
+            let ident = &expr.ident;
+            let query_ident = snake_to_pascal_case(&ident);
+            expr.statements
+                .iter()
+                .map(|statement| match statement {
+                    Statement::Insert(Insert {
+                        table_name,
+                        returning,
+                        ..
+                    }) => match returning {
+                        Some(select_items) => {
+                            let table_name = table_name.to_string();
+                            let fields: Vec<_> = select_items
+                                .iter()
+                                .flat_map(|si| match si {
+                                    sqlparser::ast::SelectItem::UnnamedExpr(sql_expr) => {
+                                        match sql_expr {
+                                            sqlparser::ast::Expr::Identifier(ident) => {
+                                                vec![Ident::new(
+                                                    &ident.to_string(),
+                                                    expr.ident.span(),
+                                                )]
+                                            }
+                                            _ => todo!(),
+                                        }
+                                    }
+                                    sqlparser::ast::SelectItem::ExprWithAlias {
+                                        expr: sql_expr,
+                                        alias: _,
+                                    } => match sql_expr {
+                                        sqlparser::ast::Expr::Identifier(ident) => {
+                                            vec![Ident::new(&ident.to_string(), expr.ident.span())]
+                                        }
+                                        _ => todo!(),
+                                    },
+                                    sqlparser::ast::SelectItem::QualifiedWildcard(
+                                        _object_name,
+                                        _wildcard_additional_options,
+                                    ) => todo!(),
+                                    sqlparser::ast::SelectItem::Wildcard(
+                                        _wildcard_additional_options,
+                                    ) => match schema.get(&table_name) {
+                                        Some(rows) => rows
+                                            .iter()
+                                            .map(|row| {
+                                                Ident::new(&row.column_name, expr.ident.span())
+                                            })
+                                            .collect::<Vec<_>>(),
+                                        None => todo!(),
+                                    },
+                                })
+                                .collect();
+                            let table_ident = Ident::new(&table_name, expr.ident.span());
+                            quote! {
+                                impl From<#query_ident> for #table_ident {
+                                    fn from(#query_ident { #(#fields,)* }: #query_ident) -> Self {
+                                        Self {
+                                            #(#fields,)*
+                                            ..Default::default()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => quote! {},
+                    },
+                    _ => quote! {},
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
 }
 
 fn input_column_names(db: &Sqlite, expr: &SqlExpr) -> syn::Result<Vec<String>> {
