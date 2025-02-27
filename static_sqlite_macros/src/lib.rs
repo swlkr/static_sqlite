@@ -3,7 +3,9 @@ use std::ops::ControlFlow;
 
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, ToTokens};
-use sqlparser::ast::{visit_relations, Delete, Insert, TableFactor, TableWithJoins};
+use sqlparser::ast::{
+    visit_relations, Delete, FromTable, Insert, SelectItem, TableFactor, TableWithJoins,
+};
 use sqlparser::{ast::Statement, dialect::SQLiteDialect, parser::Parser};
 use syn::{parse_macro_input, Error, LitStr, LocalInit, PatIdent, Result};
 
@@ -111,6 +113,57 @@ fn sql_macro(exprs: Vec<SqlExpr>) -> syn::Result<TokenStream> {
     Ok(output)
 }
 
+fn trait_parts(statement: &Statement) -> Option<(String, Option<&[SelectItem]>)> {
+    match &statement {
+        Statement::Insert(Insert {
+            table_name,
+            returning,
+            ..
+        }) => Some((
+            table_name.to_string(),
+            returning.as_ref().map(|x| x.as_slice()),
+        )),
+        Statement::Update {
+            table, returning, ..
+        } => match &table.relation {
+            TableFactor::Table { name, .. } => {
+                Some((name.to_string(), returning.as_ref().map(|x| x.as_slice())))
+            }
+            _ => None,
+        },
+        Statement::Delete(Delete {
+            from, returning, ..
+        }) => match from {
+            FromTable::WithFromKeyword(table) => match &table[..] {
+                [TableWithJoins { relation, .. }] => match relation {
+                    TableFactor::Table { name, .. } => {
+                        Some((name.to_string(), returning.as_ref().map(|x| x.as_slice())))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        },
+        Statement::Query(query) => match query.body.as_ref() {
+            sqlparser::ast::SetExpr::Select(ref select) => {
+                let table = &select.from;
+                match &table[..] {
+                    [TableWithJoins { relation, .. }] => match relation {
+                        TableFactor::Table { name, .. } => {
+                            Some((name.to_string(), Some(select.projection.as_slice())))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn trait_tokens(schema: &HashMap<String, Vec<SchemaRow>>, exprs: &[&SqlExpr]) -> Vec<TokenStream> {
     exprs
         .iter()
@@ -119,69 +172,62 @@ fn trait_tokens(schema: &HashMap<String, Vec<SchemaRow>>, exprs: &[&SqlExpr]) ->
             let query_ident = snake_to_pascal_case(&ident);
             expr.statements
                 .iter()
-                .map(|statement| match statement {
-                    Statement::Insert(Insert {
-                        table_name,
-                        returning,
-                        ..
-                    }) => match returning {
-                        Some(select_items) => {
-                            let table_name = table_name.to_string();
-                            let fields: Vec<_> = select_items
-                                .iter()
-                                .flat_map(|si| match si {
-                                    sqlparser::ast::SelectItem::UnnamedExpr(sql_expr) => {
-                                        match sql_expr {
-                                            sqlparser::ast::Expr::Identifier(ident) => {
-                                                vec![Ident::new(
-                                                    &ident.to_string(),
-                                                    expr.ident.span(),
-                                                )]
-                                            }
-                                            _ => todo!(),
-                                        }
+                .filter_map(trait_parts)
+                .map(|(table_name, returning)| match returning {
+                    Some(select_items) => {
+                        let fields: Vec<_> = select_items
+                            .iter()
+                            .flat_map(|si| match si {
+                                sqlparser::ast::SelectItem::UnnamedExpr(sql_expr) => match sql_expr
+                                {
+                                    sqlparser::ast::Expr::Identifier(ident) => {
+                                        vec![Ident::new(&ident.to_string(), expr.ident.span())]
                                     }
-                                    sqlparser::ast::SelectItem::ExprWithAlias {
-                                        expr: sql_expr,
-                                        alias: _,
-                                    } => match sql_expr {
-                                        sqlparser::ast::Expr::Identifier(ident) => {
-                                            vec![Ident::new(&ident.to_string(), expr.ident.span())]
-                                        }
-                                        _ => todo!(),
-                                    },
-                                    sqlparser::ast::SelectItem::QualifiedWildcard(
-                                        _object_name,
-                                        _wildcard_additional_options,
-                                    ) => todo!(),
-                                    sqlparser::ast::SelectItem::Wildcard(
-                                        _wildcard_additional_options,
-                                    ) => match schema.get(&table_name) {
-                                        Some(rows) => rows
-                                            .iter()
-                                            .map(|row| {
-                                                Ident::new(&row.column_name, expr.ident.span())
-                                            })
-                                            .collect::<Vec<_>>(),
-                                        None => todo!(),
-                                    },
-                                })
-                                .collect();
-                            let table_ident = Ident::new(&table_name, expr.ident.span());
-                            quote! {
-                                impl From<#query_ident> for #table_ident {
-                                    fn from(#query_ident { #(#fields,)* }: #query_ident) -> Self {
-                                        Self {
-                                            #(#fields,)*
-                                            ..Default::default()
-                                        }
+                                    _ => todo!(),
+                                },
+                                sqlparser::ast::SelectItem::ExprWithAlias {
+                                    expr: sql_expr,
+                                    alias: _,
+                                } => match sql_expr {
+                                    sqlparser::ast::Expr::Identifier(ident) => {
+                                        vec![Ident::new(&ident.to_string(), expr.ident.span())]
+                                    }
+                                    _ => todo!(),
+                                },
+                                sqlparser::ast::SelectItem::QualifiedWildcard(
+                                    object_name,
+                                    _wildcard_additional_options,
+                                ) => match schema.get(&object_name.to_string()) {
+                                    Some(rows) => rows
+                                        .iter()
+                                        .map(|row| Ident::new(&row.column_name, expr.ident.span()))
+                                        .collect::<Vec<_>>(),
+                                    None => todo!(),
+                                },
+                                sqlparser::ast::SelectItem::Wildcard(
+                                    _wildcard_additional_options,
+                                ) => match schema.get(&table_name) {
+                                    Some(rows) => rows
+                                        .iter()
+                                        .map(|row| Ident::new(&row.column_name, expr.ident.span()))
+                                        .collect::<Vec<_>>(),
+                                    None => todo!(),
+                                },
+                            })
+                            .collect();
+                        let table_ident = Ident::new(&table_name, expr.ident.span());
+                        quote! {
+                            impl From<#query_ident> for #table_ident {
+                                fn from(#query_ident { #(#fields,)* }: #query_ident) -> Self {
+                                    Self {
+                                        #(#fields,)*
+                                        ..Default::default()
                                     }
                                 }
                             }
                         }
-                        None => quote! {},
-                    },
-                    _ => quote! {},
+                    }
+                    None => quote! {},
                 })
                 .collect::<Vec<_>>()
         })
