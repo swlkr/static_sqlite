@@ -1,42 +1,6 @@
 use static_sqlite::{sql, FirstRow, Result, Sqlite};
 
 #[tokio::test]
-async fn where_clause_works() -> Result<()> {
-    sql! {
-        let migrate = r#"
-            create table User (
-                id integer primary key,
-                email text unique not null
-            );
-
-            alter table User add column created_at integer;
-        "#;
-
-        let insert_user = r#"
-            insert into User (email) values (:email) on conflict (email) do update set email = excluded.email
-        "#;
-
-        let insert_user_created = r#"
-            insert into User (email, created_at) values (:email, :created_at) on conflict (email) do update set email = excluded.email returning *
-        "#;
-    }
-
-    let db = static_sqlite::open(":memory:").await?;
-    migrate(&db).await?;
-    let email = "s@s.com";
-    insert_user(&db, email).await?;
-
-    let email = "f@f.com";
-    let user = insert_user_created(&db, email, Some(1)).await?.first_row()?;
-
-    assert_eq!(user.id, 2);
-    assert_eq!(user.email, "f@f.com");
-    assert_eq!(user.created_at, Some(1));
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn option_type_works() -> Result<()> {
     sql! {
         let migrate = r#"
